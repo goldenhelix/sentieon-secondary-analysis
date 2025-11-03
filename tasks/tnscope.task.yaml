@@ -1,0 +1,365 @@
+name: Tumor Variant Calling with TNScope
+description: Variant calling from an alignment file with Sentieon's TNScope algorithm
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 16
+
+alternative_agent_requirements:
+  Panels:
+    scheduler_cpu_cost: 1
+    cpu_cores: 8
+    memory_gb: 16
+    description: Small FASTQ inputs for gene panels
+  Exomes:
+    scheduler_cpu_cost: 2
+    cpu_cores: 16
+    memory_gb: 16
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  Genomes:
+    scheduler_cpu_cost: 2
+    cpu_cores: 32
+    memory_gb: 64
+    description: Large FASTQ inputs for high coverage genomes
+
+parameters:
+  - name: tumor_sample_name
+    label: Tumor Sample Name
+    type: string
+    help: "The name of the tumor sample to be used in the output VCF file (must match sample name in alignment file)."
+
+  - name: normal_sample_name
+    label: Normal Sample Name
+    type: string
+    optional: true
+    help: "The name of the normal sample to be used in the output VCF file (must match sample name in alignment file)."
+
+  - name: input_tumor
+    label: Input Alignment File for Tumor Sample
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    create: false
+    help: "The input alignment file for the tumor sample."
+
+  - name: input_normal
+    label: Input Alignment File for Normal Sample (Optional)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    create: false
+    help: "The input alignment file for the normal sample. If not provided, the workflow will run in tumor-only mode."
+
+  - name: output_folder
+    label: Output Folder
+    supports_location_mode: 'no_append'
+    type: directory
+    help: "The output folder for the resulting VCF files."
+
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+
+  - name: min_init_tumor_lod
+    label: Minimum Tumor Log Odds (Initial Pass)
+    type: float
+    value: "1"
+    help: Minimum tumor log odds in the initial pass. Default value of 1 for high sensitivity in highly mutated samples. Value of 3 can be used for UMI data and to get fewer somatic calls.
+    group: Variant Calling Parameters
+
+  - name: min_base_qual
+    label: Minimum Base Quality
+    type: integer
+    value: "15"
+    help: Determines the filtering quality of the bases used in variant calling.
+    group: Variant Calling Parameters
+
+  - name: prune_factor
+    label: Prune Factor
+    type: integer
+    value: "2"
+    help: Minimum pruning factor in local assembly; paths with fewer supporting kmers than FACTOR will be pruned from the graph. Setting the prune factor to 0 will turn on adaptive pruning.
+    group: Variant Calling Parameters
+
+  - name: pcr_indel_model 
+    label: PCR Indel Model
+    type: enum
+    value: "NONE"
+    choices: ["NONE", "HOSTILE", "AGGRESSIVE", "CONSERVATIVE"]
+    help: "PCR indel model used to weed out false positive indels more or less aggressively. The possible modes are: NONE (used for PCR free samples), and HOSTILE, AGGRESSIVE and CONSERVATIVE, in order of decreasing aggressiveness."
+    group: Variant Calling Parameters
+  
+  - name: phasing
+    label: Phasing
+    type: enum
+    value: "1"
+    choices: ["0", "1"]
+    help: Flag to enable or disable phasing in the output. The default value is 1 (on).
+    group: Variant Calling Parameters
+
+  - name: min_init_normal_lod
+    label: Minimum Normal Log Odds (Initial Pass)
+    type: float
+    value: "0.5"
+    help: Minimum normal log odds in the initial pass.
+    group: Variant Calling Parameters
+
+  - name: min_tumor_lod
+    label: Minimum Tumor Log Odds (Final Pass)
+    type: float
+    value: "6.3"
+    help: Minimum tumor log odds in the final pass.
+    group: Variant Calling Parameters
+
+  - name: min_normal_lod
+    label: Minimum Normal Log Odds (Final Pass)
+    type: float
+    value: "2.2"
+    help: Minimum normal log odds in the final pass.
+    group: Variant Calling Parameters
+
+  - name: tumor_contamination_frac
+    label: Tumor Contamination Fraction
+    type: float
+    value: "0"
+    help: Estimation of the contamination fraction on the tumor sample from otehr samples. 
+    group: Variant Calling Parameters
+
+  - name: normal_contamination_frac
+    label: Normal Contamination Fraction
+    type: float
+    value: "0"
+    help: Estimation of the contamination fraction on the normal sample from otehr samples. 
+    group: Variant Calling Parameters
+
+  - name: detect_sv
+    label: Detect Structural Variants
+    type: boolean
+    value: "true"
+    help: Set to false to disable structural variant detection
+    group: Variant Calling Parameters
+
+  - name: sv_mask_ext
+    label: Structural Variant Mask Extension
+    type: integer
+    value: "10"
+    help: Extension of the structural variant mask in bp.
+    group: Variant Calling Parameters
+
+  - name: max_fisher_pv_active
+    label: Maximum Fisher P-Value Active
+    type: float
+    value: "0.05"
+    help: Maximum Fisher P-value active.
+    group: Variant Calling Parameters
+
+  - name: min_tumor_allele_frac 
+    label: Minimum Tumor Allele Fraction
+    type: float
+    value: "0.0005"
+    help: Minimum tumor allele fraction.
+    group: Variant Calling Parameters
+
+  - name: kmer_sizes
+    label: Kmer Sizes
+    type: string
+    value: "35,40"
+    help: Kmer sizes to use for variant calling. Use a comma-separated list of integers.
+    group: Variant Calling Parameters
+
+  - name: assemble_mode
+    label: Assemble Mode
+    type: integer
+    value: "4"
+    help: Assemble mode. The default value is 4. 
+    group: Variant Calling Parameters
+
+  - name: no_mapq_cap
+    label: No MapQ Cap
+    type: enum
+    value: "1"
+    choices: ["0", "1"]
+    help: Set to 0 to disable the mapping quality cap.
+    group: Variant Calling Parameters
+
+  - name: clip_by_minbq
+    label: Clip by Minimum Base Quality
+    type: enum
+    value: "1"
+    choices: ["0", "1"]
+    help: Set to 0 to disable clipping by minimum base quality.
+    group: Variant Calling Parameters
+
+  - name: max_error_per_read
+    label: Maximum Error per Read
+    type: integer
+    value: "3"
+    help: Maximum error per read.
+    group: Variant Calling Parameters
+
+steps:
+  - name: tnscope
+    description: Run TNscope variant calling
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+
+        num_threads=$AGENT_CPU_CORES
+        workdir="/scratch"
+
+        # Check for tumor-only mode
+        tumor_only=false
+        if [ -z "$input_normal" ]; then
+            tumor_only=true
+        fi
+
+        # Select reference file
+        if [ -z "$ref_fasta" ]; then
+            ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+            if [ ! -f "$ref_fasta" ]; then
+                echo "The default reference file does not exist at $ref_fasta"
+                echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+                exit 1
+            fi
+        fi
+
+        # Construct output VCF file name
+        tumor_vcf="${output_folder}/${tumor_sample_name}_tnscope.vcf.gz"
+        # Check if the output VCF already exists
+        if [ -f "$tumor_vcf" ]; then
+            echo "Output VCF already exists: $tumor_vcf"
+            exit 0
+        fi
+
+        # Create output folder if it doesn't exist
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to output directory"; exit 1; }
+        logfile=${tumor_sample_name}_tnscope_run.log
+        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+
+        # Copy input files to workdir for better performance
+        echo "Copying input files to workdir..."
+        echo "Available space in workdir: $(df -h /scratch | awk 'NR==2 {print $4}')"
+        cp "$input_tumor" . || { echo "Failed to copy tumor files to workdir"; exit 1; }
+        cp "$input_tumor".bai . || { echo "Failed to copy tumor files to workdir"; exit 1; }
+        input_tumor=$(basename "$input_tumor")
+        if [ $tumor_only = false ]; then
+            cp "$input_normal" . || { echo "Failed to copy normal files to workdir"; exit 1; }
+            cp "$input_normal".bai . || { echo "Failed to copy normal files to workdir"; exit 1; }  
+            input_normal=$(basename "$input_normal")
+        fi
+
+        # Copy reference FASTA locally for better performance
+        # Check if workspace-level variable disables copying (for fast local network drives)
+        if [ "${DISABLE_FASTA_COPY_TO_SCRATCH:-false}" = "true" ]; then
+          echo "Using reference FASTA from resource storage (copy disabled by workspace setting)..."
+          local_ref_fasta="$ref_fasta"
+        else
+          echo "Copying reference FASTA to workdir..."
+          cp "$ref_fasta" . || { echo "Failed to copy reference FASTA"; exit 1; }
+          cp "$ref_fasta".fai . || { echo "Failed to copy reference FASTA index"; exit 1; }
+          local_ref_fasta=$(basename "$ref_fasta")
+        fi
+
+        # Print info
+        echo "================================================"
+        if [ $tumor_only = false ]; then
+            echo "🚀 STARTING TNSCOPE VARIANT CALLING (TUMOR-NORMAL MODE)"
+        else
+            echo "🚀 STARTING TNSCOPE VARIANT CALLING (TUMOR-ONLY MODE)"
+        fi
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor Sample: $tumor_sample_name"
+        echo "  - Tumor File: $input_tumor ($(format_file_size "$input_tumor"))"
+        if [ $tumor_only = false ]; then
+            echo "  - Normal Sample: $normal_sample_name"
+            echo "  - Normal File: $input_normal ($(format_file_size "$input_normal"))"
+        fi
+        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "  - Output VCF: ${tumor_sample_name}_tnscope.vcf.gz"
+        echo "⚙️  Configuration:"
+        echo "  - Threads: $num_threads"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        echo "  - Detect SV: $detect_sv"
+        echo "  - Min Tumor LOD (Initial): $min_init_tumor_lod"
+        echo "  - Min Tumor LOD (Final): $min_tumor_lod"
+        if [ $tumor_only = false ]; then
+            echo "  - Min Normal LOD (Initial): $min_init_normal_lod"
+            echo "  - Min Normal LOD (Final): $min_normal_lod"
+        fi
+        echo "  - PCR Indel Model: $pcr_indel_model"
+        echo "================================================"
+
+        if [[ ! $detect_sv == true ]]; then
+          disable_sv="--disable_detector sv"
+        else
+          disable_sv=""
+        fi
+        
+        TNSCOPE_START_TIME=$(date +%s)
+
+        # Run TNscope variant calling
+        sentieon driver -t $num_threads -r "$local_ref_fasta" \
+            -i "$input_tumor" \
+            ${input_normal:+-i "$input_normal"} \
+            --temp_dir "$workdir" \
+            --algo TNscope \
+            --max_fisher_pv_active $max_fisher_pv_active \
+            --min_tumor_allele_frac $min_tumor_allele_frac \
+            --kmer_sizes $kmer_sizes \
+            --assemble_mode $assemble_mode \
+            --no_mapq_cap $no_mapq_cap \
+            --clip_by_minbq $clip_by_minbq \
+            --max_error_per_read $max_error_per_read \
+            --min_init_tumor_lod $min_init_tumor_lod \
+            --min_init_normal_lod $min_init_normal_lod \
+            --min_tumor_lod $min_tumor_lod \
+            --min_normal_lod $min_normal_lod \
+            --tumor_contamination_frac $tumor_contamination_frac \
+            --normal_contamination_frac $normal_contamination_frac \
+            --phasing $phasing \
+            --prune_factor $prune_factor \
+            --pcr_indel_model $pcr_indel_model \
+            --min_base_qual $min_base_qual \
+            ${detect_sv:+--sv_mask_ext $sv_mask_ext} \
+            ${disable_sv} \
+            --tumor_sample "$tumor_sample_name" \
+            ${input_normal:+--normal_sample "$normal_sample_name"} \
+            "$tumor_vcf" || { echo "TNscope variant calling failed"; exit 1; }
+
+        # Post-execution logging
+        TNSCOPE_END_TIME=$(date +%s)
+        TNSCOPE_DURATION=$((TNSCOPE_END_TIME - TNSCOPE_START_TIME))
+        TNSCOPE_DURATION_HOUR=$((TNSCOPE_DURATION / 3600))
+        TNSCOPE_DURATION_MIN=$(((TNSCOPE_DURATION % 3600) / 60))
+        TNSCOPE_DURATION_SEC=$((TNSCOPE_DURATION % 60))
+
+        echo "================================================"
+        echo "✅ TNSCOPE VARIANT CALLING COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${TNSCOPE_DURATION_HOUR}h ${TNSCOPE_DURATION_MIN}m ${TNSCOPE_DURATION_SEC}s"
+        echo "📁 Output File: ${tumor_sample_name}_tnscope.vcf.gz ($(format_file_size "$tumor_vcf"))"
+        echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        echo "================================================"
+        
+        cp -f ${tumor_sample_name}_tnscope_run.log "$output_folder"/

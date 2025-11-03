@@ -1,0 +1,511 @@
+name: Variant Calling with DNAscope 
+description: Variant calling from an alignment file with Sentieon's DNAscope algorithm
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 32
+
+alternative_agent_requirements:
+  Panels:
+    cpu_cores: 8
+    memory_gb: 16
+    description: Small FASTQ inputs for gene panels
+  Exomes:
+    cpu_cores: 16
+    memory_gb: 32
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  Genomes:
+    cpu_cores: 32
+    memory_gb: 64
+    description: Large FASTQ inputs for high coverage genomes
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: true
+
+  - name: input_file
+    label: Input Alignment File
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    create: false
+    list: true
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+
+  - name: ml_model
+    value: "None"
+    label: Machine Learning Model
+    type: enum
+    choices: [None, Element Biosciences WES 2.1, Element Biosciences WGS 2.1, Illumina WES 2.1, Illumina WGS 2.2,
+              MGI WES 2.1, MGI WGS 2.1, Salus WES 1.0, Salus WGS 1.0, 
+              Ultima Genomics WGS 1.1]
+    optional: false
+
+  - name: model_base_path
+    label: Sentieon Models Base Path
+    group: Advanced Options 
+    type: directory
+    supports_location_mode: 'read_only'
+    optional: true
+
+  - name: pcr_free
+    label: PCR Free Sample
+    type: boolean
+    value: "false"
+    help: Set to true if the sample is PCR-free library prep for WGS
+
+  - name: output_gvcf
+    label: Output GVCF
+    type: boolean
+    value: "false"
+    help: Set to true to output GVCF format instead of VCF. Mutually exclusive with must-call VCF.
+
+  - name: joint_calling
+    label: Joint Calling
+    type: boolean
+    value: "false"
+    help: Set to true to run joint-calling for each set of inputs. Output defaults to gVCF if selected. Mutually exclusive with must-call VCF.
+
+  - name: use_must_call_vcf
+    label: Use Must-Call VCF
+    type: boolean
+    value: "false"
+    help: "Enable must-call VCF for PGx diplotyping downstream. Mutually exclusive with joint-calling and gVCF output."
+
+  - name: must_call_vcf
+    label: Must-Call VCF File
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "The must-call VCF file used for PGx diplotyping downstream. Only relevant if 'Use Must-Call VCF' is set to true. If not provided, will use default from workspace resources."
+
+steps:
+  - name: dnascope
+    description: Run Sentieon DNAscope variant calling
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+
+        num_threads=$AGENT_CPU_CORES
+        workdir="/scratch"
+
+        # Collect parameters and validate mutual exclusivity
+        if [[ "$joint_calling" = true ]] && [[ "$use_must_call_vcf" = true ]]; then
+          echo "ERROR: Must-call VCF is not supported for joint calling"
+          echo "Please disable must-call VCF and re-run the task"
+          exit 1
+        fi
+        
+        if [[ "$output_gvcf" = true ]] && [[ "$use_must_call_vcf" = true ]]; then
+          echo "ERROR: Must-call VCF is not supported for gVCF output"
+          echo "Please disable must-call VCF and re-run the task"
+          exit 1
+        fi
+        
+        # Ensure output_gvcf is set to true if joint_calling is true
+        if [[ "$joint_calling" = true ]]; then
+          output_gvcf="true"
+          echo "Joint calling enabled - automatically setting output_gvcf to true"
+        fi
+
+        # Parse list of input files by cutting list on commas
+        # Handle both single files and comma-separated lists properly
+        if [[ "$input_file" == *,* ]]; then
+          # Multiple files separated by commas
+          IFS=',' read -ra temp_input_files <<< "$input_file"
+          # Filter out empty strings
+          input_files=()
+          for file in "${temp_input_files[@]}"; do
+            if [ ! -z "$file" ]; then
+              input_files+=("$file")
+            fi
+          done
+        else
+          # Single file - create array with single element
+          input_files=("$input_file")
+        fi
+        for file in "${input_files[@]}"; do
+          echo "Input file: $file"
+        done
+        # Check if more than one input file is provided and sample name is given
+        if [ ${#input_files[@]} -gt 1 ] && [ ! -z "$sample_name" ]; then
+          echo "Sample name should not be provided for multiple input files, ignoring sample name"
+        fi
+
+        echo "Selecting reference file..."
+        if [ -z "$ref_fasta" ]; then 
+          echo "No reference file provided, using default reference file..."
+          ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+          if [ ! -f "$ref_fasta" ]; then
+            echo "The default reference file does not exist at $ref_fasta"
+            echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+            exit 1
+          fi
+        fi
+
+        echo "Selecting must-call VCF file..."
+        if [ "$use_must_call_vcf" = true ]; then
+          if [ -z "$must_call_vcf" ]; then
+            echo "No must-call VCF file provided, using default must-call VCF file..."
+            # Use workspace assembly variable to select the appropriate must-call VCF
+            case "${GH_WORKSPACE_ASSEMBLY}" in
+                GRCh_37*)
+                    must_call_vcf="$WORKSPACE_DIR/${RESOURCES_PATH}/pgx/pgx_must_call_37.vcf.gz"
+                    ;;
+                *)
+                    must_call_vcf="$WORKSPACE_DIR/${RESOURCES_PATH}/pgx/pgx_must_call_38.vcf.gz"
+                    ;;
+            esac
+            if [ ! -f "$must_call_vcf" ]; then
+              echo "The default must-call VCF file does not exist at $must_call_vcf"
+              echo "Please run the task Download Genomic Reference to download the PGx must-call VCF and then re-run this task"
+              exit 1
+            fi
+          fi
+        fi
+
+        echo "Selecting model base path..."
+        if [ -z "$model_base_path" ]; then
+          echo "No model base path provided, using default model base path..."
+          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+          if [ ! -d "$model_base_path" ]; then
+            echo "The default model base path does not exist at $model_base_path"
+            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+            exit 1
+          fi
+        fi
+
+        echo "Selecting model file..."
+        case "$ml_model" in
+
+          "None")
+            model_path=""
+            ;;
+
+          "Illumina WES 2.1")
+            model_path="${model_base_path}/DNAscopeIlluminaWES2.1.bundle"
+            ;;
+
+          "Illumina WGS 2.2")
+            model_path="${model_base_path}/SentieonIlluminaWGS2.2.bundle"
+            ;;
+
+          "Element Biosciences WES 2.1")
+            model_path="${model_base_path}/DNAscopeElementBioWES2.1.bundle"
+            ;;
+
+          "Element Biosciences WGS 2.1")
+            model_path="${model_base_path}/DNAscopeElementBioWGS2.1.bundle"
+            ;;
+
+          "MGI WES 2.1")
+            model_path="${model_base_path}/DNAscopeMGIWES2.1.bundle"
+            ;;
+
+          "MGI WGS 2.1")
+            model_path="${model_base_path}/DNAscopeMGIWGS2.1.bundle"
+            ;;
+
+          "Salus WES 1.0")
+            model_path="${model_base_path}/DNAscopeSalusWES1.0.bundle"
+            ;;
+
+          "Salus WGS 1.0")
+            model_path="${model_base_path}/DNAscopeSalusWGS1.0.bundle"
+            ;;
+
+          "Ultima Genomics WGS 1.1")
+            model_path="${model_base_path}/SentieonUltima1.1.bundle"
+            ;;
+
+          *)
+            model_path=""
+            ;;
+
+        esac
+
+        # Initialize GVCF inputs array for joint calling
+        GVCF_INPUTS=()
+        
+        # Run analysis for each input file
+        for input_file in "${input_files[@]}"; do
+
+          # Define sample name; check if length of input_files is greater than 1 and sample_name is not provided
+          if [ ${#input_files[@]} -gt 1 ] || [ -z "$sample_name" ]; then
+            sample_name=$(basename "$input_file" | cut -d '_' -f 1)
+          fi
+
+          pattern=" | "
+          if [[ "$sample_name" =~ "$pattern" ]]; then
+            echo "Sample name should not contain whitespace"
+            exit 1
+          fi
+
+          # Define metrics directory path
+          metrics_dir="${output_folder}/${sample_name}_metrics"
+
+          echo "Starting analysis for $sample_name..."
+
+          mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+          cd "$workdir" || { echo "Failed to change to output directory"; exit 1; }
+          logfile="${sample_name}_dnascope_run.log"
+          exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+
+          # Copy input files to workdir for better performance
+          echo "Copying input files to workdir..."
+          echo "Available space in workdir: $(df -h /scratch | awk 'NR==2 {print $4}')"
+          input_basename="$(basename "$input_file")"
+          echo "Copying input file $input_file to workdir..."
+          cp "$input_file"* . || { echo "Failed to copy input files to workdir"; exit 1; }
+
+          # Copy reference FASTA locally for better performance
+          # Check if workspace-level variable disables copying (for fast local network drives)
+          if [ "${DISABLE_FASTA_COPY_TO_SCRATCH:-false}" = "true" ]; then
+            echo "Using reference FASTA from resource storage (copy disabled by workspace setting)..."
+            local_ref_fasta="$ref_fasta"
+          else
+            echo "Copying reference FASTA to workdir..."
+            cp "$ref_fasta" . || { echo "Failed to copy reference FASTA"; exit 1; }
+            cp "$ref_fasta".fai . || { echo "Failed to copy reference FASTA index"; exit 1; }
+            local_ref_fasta="$(basename "$ref_fasta")"
+          fi
+
+          # Construct extra parameters based on settings
+          extra_params=""
+          if [[ "$pcr_free" = true ]]; then
+              extra_params="$extra_params --pcr_indel_model none"
+          fi
+          
+          # Set output format based on joint calling or user preference
+          if [[ "$joint_calling" = true ]] || [[ "$output_gvcf" = true ]]; then
+              extra_params="$extra_params --emit_mode gvcf"
+              output_suffix="g.vcf.gz"
+          else
+              output_suffix="vcf.gz"
+          fi
+
+          # Print info
+          echo "================================================"
+          echo "🚀 STARTING DNASCOPE VARIANT CALLING"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - Sample Name: $sample_name"
+          echo "  - Input File: $input_basename ($(format_file_size "$input_file"))"
+          echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+          if [[ "$use_must_call_vcf" = true ]]; then
+            echo "  - Must-Call VCF: $(basename "$must_call_vcf") ($(format_file_size "$must_call_vcf"))"
+          fi
+          echo "📤 Output Configuration:"
+          echo "  - Output Folder: $output_folder"
+          if [[ "$joint_calling" = true ]] || [[ "$output_gvcf" = true ]]; then
+            echo "  - Output Format: GVCF"
+          else
+            echo "  - Output Format: VCF"
+          fi
+          echo "⚙️  Configuration:"
+          echo "  - ML Model: $ml_model"
+          if [[ ! -z "$model_path" ]]; then
+            echo "  - Model Path: $model_path"
+          fi
+          echo "  - Threads: $num_threads"
+          echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+          echo "  - PCR Free: $pcr_free"
+          echo "  - Output GVCF: $output_gvcf"
+          echo "  - Joint Calling: $joint_calling"
+          if [[ "$use_must_call_vcf" = true ]]; then
+            echo "  - Use Must-Call VCF: true"
+          fi
+          echo "================================================"
+
+          # Run DNAscope variant calling
+          DNASCOPE_START_TIME=$(date +%s)
+
+          # Check if must-call VCF is enabled
+          if [[ "$use_must_call_vcf" = true ]]; then
+            echo "Running DNAscope with must-call VCF for PGx variants..."
+            
+            # Copy must-call VCF to workdir
+            cp "$must_call_vcf" . || { echo "Failed to copy must-call VCF"; exit 1; }
+            cp "$must_call_vcf".tbi . || { echo "Failed to copy must-call VCF index"; exit 1; }
+            local_must_call_vcf="$(basename "$must_call_vcf")"
+            
+            # Run DNAscope with must-call VCF
+            if [[ ! -z "$model_path" ]]; then
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope --model "$model_path/dnascope.model" \
+                --given "$local_must_call_vcf" \
+                --emit_conf=10 \
+                --call_conf=30 \
+                "${sample_name}_dnascope_pgx_tmp.vcf.gz" || \
+                { echo "DNAscope variant calling with must-call failed"; exit 1; }
+
+              sentieon driver -r "$local_ref_fasta" -t $num_threads --temp_dir "$workdir" \
+                --algo DNAModelApply --model "$model_path/dnascope.model" \
+                -v "${sample_name}_dnascope_pgx_tmp.vcf.gz" "${sample_name}_dnascope_pgx.vcf.gz" || \
+                { echo "DNAModelApply for must-call failed"; exit 1; }
+            else
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope \
+                --given "$local_must_call_vcf" \
+                --emit_conf=10 \
+                --call_conf=30 \
+                "${sample_name}_dnascope_pgx.vcf.gz" || \
+                { echo "DNAscope variant calling with must-call failed"; exit 1; }
+            fi
+            
+            # Run DNAscope for regular variant calling
+            if [[ ! -z "$model_path" ]]; then
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope --model "$model_path/dnascope.model" \
+                --emit_conf=10 \
+                --emit_mode="variant" \
+                --call_conf=30 \
+                "${sample_name}_dnascope_tmp.vcf.gz" || \
+                { echo "DNAscope variant calling failed"; exit 1; }
+
+              sentieon driver -r "$local_ref_fasta" -t $num_threads --temp_dir "$workdir" \
+                --algo DNAModelApply --model "$model_path/dnascope.model" \
+                -v "${sample_name}_dnascope_tmp.vcf.gz" "${sample_name}_dnascope.vcf.gz" || \
+                { echo "DNAModelApply failed"; exit 1; }
+            else
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope \
+                --emit_conf=10 \
+                --emit_mode="variant" \
+                --call_conf=30 \
+                "${sample_name}_dnascope.vcf.gz" || \
+                { echo "DNAscope variant calling failed"; exit 1; }
+            fi
+            
+            # Merge the two VCF files
+            bcftools concat "${sample_name}_dnascope.vcf.gz" "${sample_name}_dnascope_pgx.vcf.gz" --rm-dups all -a -O v -o "${sample_name}_dnascope_merged.vcf" || \
+              { echo "bcftools concat failed"; exit 1; }
+            bgzip "${sample_name}_dnascope_merged.vcf" || \
+              { echo "bgzip failed"; exit 1; }
+            
+            # Move final output to output folder
+            mv "${sample_name}_dnascope_merged.vcf.gz" "${output_folder}/${sample_name}_dnascope.vcf.gz" || \
+              { echo "Failed to move merged VCF to output folder"; exit 1; }
+            
+          else
+            # Standard DNAscope calling without must-call
+            if [[ ! -z "$model_path" ]]; then
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope --model "$model_path/dnascope.model" $extra_params \
+                "${sample_name}_dnascope_tmp.$output_suffix" || \
+                { echo "DNAscope variant calling failed"; exit 1; }
+
+              sentieon driver -r "$local_ref_fasta" -t $num_threads --temp_dir "$workdir" \
+                --algo DNAModelApply --model "$model_path/dnascope.model" \
+                -v "${sample_name}_dnascope_tmp.$output_suffix" "${output_folder}/${sample_name}_dnascope.$output_suffix" || \
+                { echo "DNAModelApply failed"; exit 1; }
+            else
+              sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
+                --algo DNAscope $extra_params \
+                "${output_folder}/${sample_name}_dnascope.$output_suffix" || \
+                { echo "DNAscope variant calling failed"; exit 1; }
+            fi
+          fi
+
+          # Post-execution logging
+          DNASCOPE_END_TIME=$(date +%s)
+          DNASCOPE_DURATION=$((DNASCOPE_END_TIME - DNASCOPE_START_TIME))
+          DNASCOPE_DURATION_HOUR=$((DNASCOPE_DURATION / 3600))
+          DNASCOPE_DURATION_MIN=$(((DNASCOPE_DURATION % 3600) / 60))
+          DNASCOPE_DURATION_SEC=$((DNASCOPE_DURATION % 60))
+          
+          # Calculate file size based on output type
+          if [ "$use_must_call_vcf" = true ]; then
+            output_file="${output_folder}/${sample_name}_dnascope.vcf.gz"
+          else
+            output_file="${output_folder}/${sample_name}_dnascope.$output_suffix"
+          fi
+          
+          echo "================================================"
+          echo "✅ DNASCOPE VARIANT CALLING COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${DNASCOPE_DURATION_HOUR}h ${DNASCOPE_DURATION_MIN}m ${DNASCOPE_DURATION_SEC}s"
+          echo "📁 Output File: $(basename "$output_file") ($(format_file_size "$output_file"))"
+          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+          echo "================================================"
+          
+          cp -f "${sample_name}_dnascope_run.log" "$output_folder"/
+
+          # Add GVCF to joint calling inputs if joint calling is enabled
+          if [ "$joint_calling" = true ]; then
+            if [ "$use_must_call_vcf" = true ]; then
+              # Must-call mode doesn't support joint calling, but we'll add the merged VCF for consistency
+              GVCF_INPUTS+=("-v" "${output_folder}/${sample_name}_dnascope.vcf.gz")
+            else
+              GVCF_INPUTS+=("-v" "${output_folder}/${sample_name}_dnascope.$output_suffix")
+            fi
+          fi
+
+        done
+
+        # ******************************************
+        # Perform joint calling if enabled
+        # ******************************************
+        if [ "$joint_calling" = true ]; then
+          echo "================================================"
+          echo "🚀 STARTING JOINT CALLING WITH GVCFTYPER"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - Number of GVCFs: ${#GVCF_INPUTS[@]}"
+          echo "⚙️  Configuration:"
+          echo "  - Threads: $num_threads"
+          echo "================================================"
+          
+          JOINT_START_TIME=$(date +%s)
+          
+          # Use the reference FASTA from the last iteration
+          if [ "${DISABLE_FASTA_COPY_TO_SCRATCH:-false}" = "true" ]; then
+            joint_ref_fasta="$ref_fasta"
+          else
+            joint_ref_fasta="$local_ref_fasta"
+          fi
+          
+          # Run GVCFtyper for joint calling
+          sentieon driver -r "$joint_ref_fasta" --algo GVCFtyper "${GVCF_INPUTS[@]}" \
+            "${output_folder}/joint_called.vcf.gz" || \
+            { echo "GVCFtyper failed"; exit 1; }
+          
+          # Post-execution logging for joint calling
+          JOINT_END_TIME=$(date +%s)
+          JOINT_DURATION=$((JOINT_END_TIME - JOINT_START_TIME))
+          JOINT_DURATION_HOUR=$((JOINT_DURATION / 3600))
+          JOINT_DURATION_MIN=$(((JOINT_DURATION % 3600) / 60))
+          JOINT_DURATION_SEC=$((JOINT_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ JOINT CALLING COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${JOINT_DURATION_HOUR}h ${JOINT_DURATION_MIN}m ${JOINT_DURATION_SEC}s"
+          echo "📁 Output File: joint_called.vcf.gz ($(format_file_size "${output_folder}/joint_called.vcf.gz"))"
+          echo "================================================"
+        fi

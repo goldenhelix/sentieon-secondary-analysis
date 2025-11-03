@@ -1,0 +1,847 @@
+name: Alignment with BWA-MEM
+description: BWA Mem alignment on one or more FASTQ files for a single sample
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 32
+
+alternative_agent_requirements:
+  Panels:
+    cpu_cores: 8
+    memory_gb: 16
+    description: Small FASTQ inputs for gene panels
+  Exomes:
+    cpu_cores: 16
+    memory_gb: 32
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  Genomes:
+    cpu_cores: 32
+    memory_gb: 64
+    description: Large FASTQ inputs for high coverage genomes
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: false
+
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "Optionally specify the reference file to align to. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
+    
+  - name: ml_model
+    value: "None"
+    label: Machine Learning Model
+    type: enum
+    choices: [None, Element Biosciences WES 2.1, Element Biosciences WGS 2.1, Illumina WES 2.1, Illumina WGS 2.2,
+              MGI WES 2.1, MGI WGS 2.1, Salus WES 1.0, Salus WGS 1.0, 
+              Ultima Genomics WGS 1.1]
+    optional: false
+
+  - name: umi_read_structure
+    label: UMI Read Structure
+    type: string
+    optional: true
+    help: "The read structure of the UMI reads (ex. 6M+T,6M+T for 6 base prefix on paired reads, see Sentieon manual for more details). If not provided, UMI data will not be extracted."
+
+  - name: duplex_umi
+    label: Duplex UMI
+    type: boolean
+    optional: true
+    help: "If Duplex UMI is enabled, the UMI will be extracted from the duplex reads. If disabled, the UMI will be extracted from the single reads. Ignored if UMI read structure is not provided."
+
+  - name: use_prefix
+    label: Use Sample Name as Prefix Filter
+    group: Advanced Options
+    type: boolean
+    value: "false"
+    help: "If enabled, only FASTQ files starting with the sample name will be processed. Enable this when the input folder contains FASTQ files from multiple samples. If disabled, all FASTQ files in the input folder are assumed to belong to this sample."
+  
+  - name: perform_dedup
+    label: Perform Deduplication
+    group: Advanced Options
+    type: boolean
+    value: "true"
+
+  - name: output_metrics
+    label: Output Metrics
+    group: Advanced Options
+    type: boolean
+    value: "true"
+
+  - name: cram 
+    label: Output CRAM 
+    group: Advanced Options
+    type: boolean
+    value: "false"
+
+  - name: model_base_path
+    label: Sentieon Models Base Path
+    group: Advanced Options 
+    type: directory
+    supports_location_mode: 'read_only'
+    optional: true
+
+  - name: input_bases_per_batch
+    label: Input Bases Per Batch (For Reproducibility)
+    type: integer
+    group: BWA-MEM Options
+    value: "10000000"
+
+steps:
+  - name: bwa-mem
+    description: Run BWA-MEM
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+        licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
+
+        # Agent setup
+        bwt_mem=$((AGENT_MEMORY_GB - 2))
+        num_threads=$AGENT_CPU_CORES
+        export bwt_max_mem="$bwt_mem"G
+
+        # Validate sample name
+        pattern=" | "
+        if [[ "$sample_name" =~ "$pattern" ]]; then
+          echo "Sample name should not contain whitespace"
+          exit 1
+        fi
+
+        # Define metrics directory path
+        metrics_dir="${output_folder}/${sample_name}_metrics"
+
+        # Select reference file
+        if [ -z "$ref_fasta" ]; then 
+          ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+          if [ ! -f "$ref_fasta" ]; then
+            echo "The default reference file does not exist at $ref_fasta"
+            echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+            exit 1
+          fi
+        fi
+
+        # Select model base path
+        if [ -z "$model_base_path" ]; then
+          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+          if [ ! -d "$model_base_path" ]; then
+            echo "The default model base path does not exist at $model_base_path"
+            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+            exit 1
+          fi
+        fi
+
+        # Select model file
+        case "$ml_model" in
+          "None")
+            platform=""
+            model_path=""
+            ;;
+          "Illumina WES 2.1")
+            platform="ILLUMINA"
+            model_path="$model_base_path/DNAscopeIlluminaWES2.1.bundle"
+            ;;
+          "Illumina WGS 2.2")
+            platform="ILLUMINA"
+            model_path="$model_base_path/SentieonIlluminaWGS2.2.bundle"
+            ;;
+          "Element Biosciences WES 2.1")
+            platform="ELEMENT"
+            model_path="$model_base_path/DNAscopeElementBioWES2.1.bundle"
+            ;;
+          "Element Biosciences WGS 2.1")
+            platform="ELEMENT"
+            model_path="$model_base_path/DNAscopeElementBioWGS2.1.bundle"
+            ;;
+          "MGI WES 2.1")
+            platform="MGI"
+            model_path="$model_base_path/DNAscopeMGIWES2.1.bundle"
+            ;;
+          "MGI WGS 2.1")
+            platform="MGI"
+            model_path="$model_base_path/DNAscopeMGIWGS2.1.bundle"
+            ;;
+          "Salus WES 1.0")
+            platform="SALUS"
+            model_path="$model_base_path/DNAscopeSalusWES1.0.bundle"
+            ;;
+          "Salus WGS 1.0")
+            platform="SALUS"
+            model_path="$model_base_path/DNAscopeSalusWGS1.0.bundle"
+            ;;
+          "Ultima Genomics WGS 1.1")
+            platform="ULTIMA"
+            model_path="$model_base_path/SentieonUltima1.1.bundle"
+            ;;
+          *)
+            platform="ILLUMINA"
+            model_path=""
+            ;;
+        esac
+
+        # UMI read structure
+        umi=false
+        consensus_arg=""
+        if [ ! -z "$umi_read_structure" ]; then
+          umi=true
+          consensus_arg="--consensus --umi_tag XR"
+        fi
+
+        if [ $umi == true ] && [ $duplex_umi == true ]; then
+          umi_read_structure="-d $umi_read_structure"
+        fi
+
+        # Advanced Options
+        if [[ $cram == true ]]; then
+          align_extension=".cram"
+        else
+          align_extension=".bam"
+        fi
+
+        # Auto-detect paired-end reads based on file naming
+        paired_end=false
+        while IFS= read -r file; do
+          # Remove the directory path
+          filename=$(basename "$file")
+          # Remove .fastq.gz or .fq.gz extension
+          if [[ "$filename" =~ \.fastq\.gz$ ]]; then
+            base_name="${filename%.fastq.gz}"
+          elif [[ "$filename" =~ \.fq\.gz$ ]]; then
+            base_name="${filename%.fq.gz}"
+          else
+            continue
+          fi
+          # Check if the base name contains _R1/_R2 (anywhere) or ends with _1/_2
+          if [[ "$base_name" =~ _R1 ]] || [[ "$base_name" =~ _R2 ]] || [[ "$base_name" =~ (_1|_2)$ ]]; then
+            paired_end=true
+            break
+          fi
+        done < <(if [[ "$use_prefix" == "true" ]]; then
+          find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+        else
+          find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+        fi)
+
+        echo "Copying reference files to /scratch, which has available storage: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        workdir="/scratch"
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to output directory"; exit 1; }
+        logfile=${sample_name}_bwa_run.log
+        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+        
+        # Copy reference FASTA to workdir
+        cp "$ref_fasta" . || { echo "Failed to copy reference FASTA"; exit 1; }
+        cp "$ref_fasta".fai . || { echo "Failed to copy reference FASTA index"; exit 1; }
+        ref_fasta_local=$(basename "$ref_fasta")
+
+        # BWA-MEM Alignment Step
+        echo "================================================"
+        echo "🚀 STARTING BWA-MEM ALIGNMENT"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+        echo "  - Input Folder: $input_folder"
+        if [[ "$use_prefix" == "true" ]]; then
+          echo "  - Input Filter: ${sample_name}*.fastq.gz"
+        else
+          echo "  - Input Filter: *.fastq.gz"
+        fi
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "  - Output Format: $align_extension"
+        echo "⚙️  Configuration:"
+        echo "  - ML Model: $ml_model"
+        echo "  - Platform: $platform"
+        echo "  - Threads: $num_threads"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        echo "  - Paired-End: $paired_end (detected automatically)"
+        if [ $umi == true ]; then
+          echo "  - UMI: $umi_read_structure"
+          perform_dedup=true
+          output_metrics=true
+        fi
+        echo "  - Perform Deduplication: $perform_dedup"
+        echo "  - Output Metrics: $output_metrics"
+        echo "================================================"
+        
+        # Record start time
+        BWA_START_TIME=$(date +%s)
+
+        bam_input=""
+        if [[ $paired_end == true ]]; then
+          while IFS= read -r file; do
+            # Detect which pattern is used (_R1/_R2 or _1/_2)
+            fastq_1=""
+            fastq_2=""
+            reads_base=""
+            
+            if [[ "$file" =~ _R1 ]]; then
+              # Handle _R1/_R2 pattern (anywhere in filename)
+              fastq_1="$file"
+              fastq_2="${file/_R1/_R2}"
+              reads_base="${fastq_1%%_R1*}"
+            elif [[ "$file" =~ _1\.fastq\.gz$ ]] || [[ "$file" =~ _1\.fq\.gz$ ]]; then
+              # Handle _1/_2 pattern - only at the end of the filename (before extension)
+              fastq_1="$file"
+              # More careful replacement to ensure we replace _1 with _2 only at the end before extensions
+              if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                fastq_2="${file%_1.fastq.gz}_2.fastq.gz"
+              elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                fastq_2="${file%_1.fq.gz}_2.fq.gz"
+              fi
+              reads_base="${fastq_1%%_1.*}"
+            fi
+            
+            sample_lane=$(basename "$reads_base")
+            if [[ -f "$fastq_1" && -f "$fastq_2" ]]; then
+              bam_input="$bam_input -i ${sample_lane}.bam"
+              if [[ -z "$platform" ]]; then
+                read_groups="@RG\tID:${sample_lane}\tSM:$sample_name"
+              else
+                read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
+              fi
+              start_time=$SECONDS
+              if [ $umi == false ]; then 
+                { (sentieon bwa mem \
+                    -R "$read_groups" \
+                    ${model_path:+-x "${model_path}"/bwa.model} \
+                    -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                    "$fastq_1" "$fastq_2" \
+                    || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                  2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                    3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                    { echo "BWA-MEM failed"; exit 1; }
+              else
+                { (sentieon umi extract $umi_read_structure "$fastq_1" "$fastq_2" || \
+                    { echo -n "UMI extract error"; false; }) | \
+                  (sentieon bwa mem \
+                    -p -C \
+                    -R "$read_groups" \
+                    ${model_path:+-x "${model_path}"/bwa.model} \
+                    -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                    - \
+                    || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                  2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                    3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                    { echo "BWA-MEM failed"; exit 1; }
+              fi
+              duration=$((SECONDS - start_time))
+              file_size=$(stat -c%s "${sample_lane}.bam")
+            fi
+          done < <(if [[ "$use_prefix" == "true" ]]; then
+            find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+          else
+            find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+          fi)
+        else
+          while IFS= read -r file; do
+            reads_base="${file%.fastq.gz}"
+            sample_lane=$(basename "$reads_base")
+            
+            # Validate FASTQ file before processing
+            if ! zcat "$file" | awk 'NR%4==2{seq_len=length($0)} NR%4==0{qual_len=length($0); if(seq_len!=qual_len){print "ERROR: SEQ and QUAL length mismatch at line " NR-3 " (sequence length: " seq_len ", quality length: " qual_len ")"; exit 1}} END{if(NR%4!=0){print "ERROR: Invalid FASTQ format - file does not contain complete read records"; exit 1}}'; then
+              echo "ERROR: FASTQ file validation failed for $file"
+              echo "This error typically indicates corrupted or malformed FASTQ data"
+              exit 1
+            fi
+            
+            bam_input="$bam_input -i ${sample_lane}.bam"
+            if [[ -z "$platform" ]]; then
+              read_groups="@RG\tID:${sample_lane}\tSM:$sample_name"
+            else
+              read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
+            fi
+            start_time=$SECONDS
+            if [ $umi == false ]; then
+              { (sentieon bwa mem \
+                -M -R "$read_groups" \
+                ${model_path:+-x "${model_path}"/bwa.model} \
+                -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                "$file" \
+                || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                { echo "BWA-MEM failed"; exit 1; }
+            else
+              { (sentieon umi extract $umi_read_structure "$file" || \
+                  { echo -n "UMI extract error"; false; }) | \
+                (sentieon bwa mem \
+                  -M -R "$read_groups" \
+                  ${model_path:+-x "${model_path}"/bwa.model} \
+                  -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                  "$file" \
+                  || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                { echo "BWA-MEM failed"; exit 1; }
+            fi
+            duration=$((SECONDS - start_time))
+            file_size=$(stat -c%s "${sample_lane}.bam")
+          done < <(if [[ "$use_prefix" == "true" ]]; then
+            find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+          else
+            find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+          fi)
+        fi
+
+        if [ "$bam_input" = "" ]; then
+          echo "ERROR: No FASTQ files found in $input_folder"
+           if [[ $paired_end == true ]]; then
+            echo "NOTE: Paired-end files must have matching pairs with _R1/_R2 or _1/_2 suffixes"
+           fi
+          exit 1
+        fi
+
+        # Post-execution logging for BWA-MEM
+        BWA_END_TIME=$(date +%s)
+        BWA_DURATION=$((BWA_END_TIME - BWA_START_TIME))
+        BWA_DURATION_HOUR=$((BWA_DURATION / 3600))
+        BWA_DURATION_MIN=$(((BWA_DURATION % 3600) / 60))
+        BWA_DURATION_SEC=$((BWA_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ BWA-MEM ALIGNMENT COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${BWA_DURATION_HOUR}h ${BWA_DURATION_MIN}m ${BWA_DURATION_SEC}s"
+        
+        # Calculate total output size
+        BWA_TOTAL_SIZE=0
+        for bam_file in $(echo "$bam_input" | grep -o '\-i [^ ]*' | sed 's/-i //'); do
+          if [ -f "$bam_file" ]; then
+            BWA_TOTAL_SIZE=$((BWA_TOTAL_SIZE + $(stat -c%s "$bam_file" 2>/dev/null || echo "0")))
+          fi
+        done
+        
+        # Format total size
+        if [ $BWA_TOTAL_SIZE -ge 1073741824 ]; then
+          BWA_TOTAL_GB=$((BWA_TOTAL_SIZE / 1024 / 1024 / 1024))
+          BWA_TOTAL_MB=$(((BWA_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+          BWA_TOTAL_DECIMAL=$((BWA_TOTAL_MB * 100 / 1024))
+          BWA_TOTAL_FORMATTED="${BWA_TOTAL_GB}.${BWA_TOTAL_DECIMAL} GB"
+        elif [ $BWA_TOTAL_SIZE -ge 1048576 ]; then
+          BWA_TOTAL_MB=$((BWA_TOTAL_SIZE / 1024 / 1024))
+          BWA_TOTAL_KB=$(((BWA_TOTAL_SIZE % (1024 * 1024)) / 1024))
+          BWA_TOTAL_DECIMAL=$((BWA_TOTAL_KB * 100 / 1024))
+          BWA_TOTAL_FORMATTED="${BWA_TOTAL_MB}.${BWA_TOTAL_DECIMAL} MB"
+        else
+          BWA_TOTAL_FORMATTED="${BWA_TOTAL_SIZE} bytes"
+        fi
+        
+        echo "📁 **Total Output Size: $BWA_TOTAL_FORMATTED**"
+        echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        echo "================================================"
+
+        if [ $output_metrics == true ]; then
+          
+          # Metrics Collection Step
+          echo "================================================"
+          echo "🚀 STARTING METRICS COLLECTION"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - BAM Files: $(echo "$bam_input" | grep -o '\-i [^ ]*' | sed 's/-i //' | wc -l) files"
+          echo "  - Reference FASTA: $(basename "$ref_fasta_local")"
+          echo "⚙️  Configuration:"
+          echo "  - Threads: $num_threads"
+          echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+          echo "  - Perform Deduplication: $perform_dedup"
+          echo "================================================"
+          
+          # Record start time
+          METRICS_START_TIME=$(date +%s)
+
+          # Create local metrics directory instead of writing directly to output folder
+          metrics_dir_local="metrics"
+          mkdir -p "$metrics_dir_local" || { echo "Failed to create local metrics directory"; exit 1; }
+
+          if [ $perform_dedup == true ]; then
+            # When both metrics and dedup are needed, combine the operations
+            echo "Running metrics collection with LocusCollector for deduplication..."
+            if ! sentieon driver -r "$ref_fasta_local" -t $num_threads $bam_input --temp_dir "$workdir" \
+              --algo LocusCollector --fun score_info score.txt.gz $consensus_arg \
+              --algo MeanQualityByCycle "$metrics_dir_local/${sample_name}_mq_metrics.txt" \
+              --algo QualDistribution "$metrics_dir_local/${sample_name}_qd_metrics.txt" \
+              --algo GCBias --summary "$metrics_dir_local/${sample_name}_gc_summary.txt" "$metrics_dir_local/${sample_name}_gc_metrics.txt" \
+              --algo AlignmentStat --adapter_seq '' "$metrics_dir_local/${sample_name}_aln_metrics.txt" \
+              --algo InsertSizeMetricAlgo "$metrics_dir_local/${sample_name}_is_metrics.txt"; then
+              echo "ERROR: Metrics and LocusCollector failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Reference: $ref_fasta_local"
+              echo "  - Threads: $num_threads"
+              echo "  - BAM input: $bam_input"
+              echo "  - Workdir: $workdir"
+              echo "  - Consensus arg: $consensus_arg"
+              exit 1
+            fi
+          else
+            # Just metrics collection
+            echo "Running metrics collection only..."
+            if ! sentieon driver -r "$ref_fasta_local" -t $num_threads $bam_input --temp_dir "$workdir" \
+              --algo LocusCollector --fun score_info score.txt.gz \
+              --algo MeanQualityByCycle "$metrics_dir_local/${sample_name}_mq_metrics.txt" \
+              --algo QualDistribution "$metrics_dir_local/${sample_name}_qd_metrics.txt" \
+              --algo GCBias --summary "$metrics_dir_local/${sample_name}_gc_summary.txt" "$metrics_dir_local/${sample_name}_gc_metrics.txt" \
+              --algo AlignmentStat --adapter_seq '' "$metrics_dir_local/${sample_name}_aln_metrics.txt" \
+              --algo InsertSizeMetricAlgo "$metrics_dir_local/${sample_name}_is_metrics.txt"; then
+              echo "ERROR: Metrics collection failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Reference: $ref_fasta_local"
+              echo "  - Threads: $num_threads"
+              echo "  - BAM input: $bam_input"
+              echo "  - Workdir: $workdir"
+              exit 1
+            fi
+          fi
+
+          echo "Generating metrics plots..."
+          if ! sentieon plot QualDistribution \
+            -o "$metrics_dir_local/${sample_name}_qd_metrics.pdf" "$metrics_dir_local/${sample_name}_qd_metrics.txt" >/dev/null 2>&1; then
+            echo "WARNING: Failed to generate QualDistribution plot"
+          fi
+          if ! sentieon plot MeanQualityByCycle \
+            -o "$metrics_dir_local/${sample_name}_mq_metrics.pdf" "$metrics_dir_local/${sample_name}_mq_metrics.txt" >/dev/null 2>&1; then
+            echo "WARNING: Failed to generate MeanQualityByCycle plot"
+          fi
+          if ! sentieon plot GCBias \
+            -o "$metrics_dir_local/${sample_name}_gc_metrics.pdf" "$metrics_dir_local/${sample_name}_gc_metrics.txt" >/dev/null 2>&1; then
+            echo "WARNING: Failed to generate GCBias plot"
+          fi
+          if ! sentieon plot InsertSizeMetricAlgo \
+            -o "$metrics_dir_local/${sample_name}_is_metrics.pdf" "$metrics_dir_local/${sample_name}_is_metrics.txt" >/dev/null 2>&1; then
+            echo "WARNING: Failed to generate InsertSizeMetricAlgo plot"
+          fi
+        
+          # Post-execution logging for Metrics
+          METRICS_END_TIME=$(date +%s)
+          METRICS_DURATION=$((METRICS_END_TIME - METRICS_START_TIME))
+          METRICS_DURATION_HOUR=$((METRICS_DURATION / 3600))
+          METRICS_DURATION_MIN=$(((METRICS_DURATION % 3600) / 60))
+          METRICS_DURATION_SEC=$((METRICS_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ METRICS COLLECTION COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${METRICS_DURATION_HOUR}h ${METRICS_DURATION_MIN}m ${METRICS_DURATION_SEC}s"
+          
+          # Calculate metrics output size
+          METRICS_TOTAL_SIZE=0
+          if [ -d "$metrics_dir_local" ]; then
+            METRICS_TOTAL_SIZE=$(du -sb "$metrics_dir_local" 2>/dev/null | cut -f1 || echo "0")
+          fi
+          
+          # Format total size
+          if [ $METRICS_TOTAL_SIZE -ge 1073741824 ]; then
+            METRICS_TOTAL_GB=$((METRICS_TOTAL_SIZE / 1024 / 1024 / 1024))
+            METRICS_TOTAL_MB=$(((METRICS_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+            METRICS_TOTAL_DECIMAL=$((METRICS_TOTAL_MB * 100 / 1024))
+            METRICS_TOTAL_FORMATTED="${METRICS_TOTAL_GB}.${METRICS_TOTAL_DECIMAL} GB"
+          elif [ $METRICS_TOTAL_SIZE -ge 1048576 ]; then
+            METRICS_TOTAL_MB=$((METRICS_TOTAL_SIZE / 1024 / 1024))
+            METRICS_TOTAL_KB=$(((METRICS_TOTAL_SIZE % (1024 * 1024)) / 1024))
+            METRICS_TOTAL_DECIMAL=$((METRICS_TOTAL_KB * 100 / 1024))
+            METRICS_TOTAL_FORMATTED="${METRICS_TOTAL_MB}.${METRICS_TOTAL_DECIMAL} MB"
+          else
+            METRICS_TOTAL_FORMATTED="${METRICS_TOTAL_SIZE} bytes"
+          fi
+          
+          echo "📁 **Total Output Size: $METRICS_TOTAL_FORMATTED**"
+          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+          echo "================================================"
+        
+        fi  
+
+        output_bam_path=""
+
+        if [ $perform_dedup == true ]; then
+
+          # Deduplication Step
+          echo "================================================"
+          echo "🚀 STARTING DEDUPLICATION"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - BAM Files: $(echo "$bam_input" | grep -o '\-i [^ ]*' | sed 's/-i //' | wc -l) files"
+          echo "  - Reference FASTA: $(basename "$ref_fasta_local")"
+          echo "⚙️  Configuration:"
+          echo "  - Threads: $num_threads"
+          echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+          echo "  - Output Metrics: $output_metrics"
+          echo "================================================"
+          
+          # Record start time
+          DEDUP_START_TIME=$(date +%s)
+
+          if [ $output_metrics == true ]; then
+            echo "Running deduplication with metrics..."
+            if ! sentieon driver -r "$ref_fasta_local" -t $num_threads --temp_dir "$workdir" $bam_input --algo Dedup \
+              --score_info score.txt.gz --metrics "$metrics_dir_local/${sample_name}_dedup_metrics.txt" \
+              "${sample_name}_deduped${align_extension}"; then
+              echo "ERROR: Deduplication failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Reference: $ref_fasta_local"
+              echo "  - Threads: $num_threads"
+              echo "  - Workdir: $workdir"
+              echo "  - BAM input: $bam_input"
+              echo "  - Output: ${sample_name}_deduped${align_extension}"
+              exit 1
+            fi
+            echo "Copying deduplicated file to output folder..."
+            if ! cp "${sample_name}_deduped${align_extension}"* "${output_folder}/"; then
+              echo "ERROR: Failed to copy deduplicated file to output folder"
+              exit 1
+            fi
+          else
+            echo "Running LocusCollector for deduplication..."
+            if ! sentieon driver -t $num_threads --temp_dir "$workdir" $bam_input --algo LocusCollector \
+              --fun score_info score.txt.gz $consensus_arg; then
+              echo "ERROR: LocusCollector failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Threads: $num_threads"
+              echo "  - Workdir: $workdir"
+              echo "  - BAM input: $bam_input"
+              echo "  - Consensus arg: $consensus_arg"
+              exit 1
+            fi
+            echo "Running deduplication..."
+            if ! sentieon driver -r "$ref_fasta_local" -t $num_threads --temp_dir "$workdir" $bam_input --algo Dedup \
+              --score_info score.txt.gz \
+              "${output_folder}/${sample_name}_deduped${align_extension}"; then
+              echo "ERROR: Deduplication failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Reference: $ref_fasta_local"
+              echo "  - Threads: $num_threads"
+              echo "  - Workdir: $workdir"
+              echo "  - BAM input: $bam_input"
+              echo "  - Output: ${output_folder}/${sample_name}_deduped${align_extension}"
+              exit 1
+            fi
+          fi
+
+          # Post-execution logging for Deduplication
+          DEDUP_END_TIME=$(date +%s)
+          DEDUP_DURATION=$((DEDUP_END_TIME - DEDUP_START_TIME))
+          DEDUP_DURATION_HOUR=$((DEDUP_DURATION / 3600))
+          DEDUP_DURATION_MIN=$(((DEDUP_DURATION % 3600) / 60))
+          DEDUP_DURATION_SEC=$((DEDUP_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ DEDUPLICATION COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${DEDUP_DURATION_HOUR}h ${DEDUP_DURATION_MIN}m ${DEDUP_DURATION_SEC}s"
+          
+          output_bam_path="${sample_name}_deduped${align_extension}"
+          
+          # Calculate deduplication output size
+          DEDUP_TOTAL_SIZE=0
+          if [ -f "${sample_name}_deduped${align_extension}" ]; then
+            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}" 2>/dev/null || echo "0")))
+          fi
+          if [ -f "${sample_name}_deduped${align_extension}.bai" ]; then
+            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}.bai" 2>/dev/null || echo "0")))
+          fi
+          if [ -f "${sample_name}_deduped${align_extension}.crai" ]; then
+            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}.crai" 2>/dev/null || echo "0")))
+          fi
+          
+          # Format total size
+          if [ $DEDUP_TOTAL_SIZE -ge 1073741824 ]; then
+            DEDUP_TOTAL_GB=$((DEDUP_TOTAL_SIZE / 1024 / 1024 / 1024))
+            DEDUP_TOTAL_MB=$(((DEDUP_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+            DEDUP_TOTAL_DECIMAL=$((DEDUP_TOTAL_MB * 100 / 1024))
+            DEDUP_TOTAL_FORMATTED="${DEDUP_TOTAL_GB}.${DEDUP_TOTAL_DECIMAL} GB"
+          elif [ $DEDUP_TOTAL_SIZE -ge 1048576 ]; then
+            DEDUP_TOTAL_MB=$((DEDUP_TOTAL_SIZE / 1024 / 1024))
+            DEDUP_TOTAL_KB=$(((DEDUP_TOTAL_SIZE % (1024 * 1024)) / 1024))
+            DEDUP_TOTAL_DECIMAL=$((DEDUP_TOTAL_KB * 100 / 1024))
+            DEDUP_TOTAL_FORMATTED="${DEDUP_TOTAL_MB}.${DEDUP_TOTAL_DECIMAL} MB"
+          else
+            DEDUP_TOTAL_FORMATTED="${DEDUP_TOTAL_SIZE} bytes"
+          fi
+          
+          echo "📁 **Total Output Size: $DEDUP_TOTAL_FORMATTED**"
+          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+          echo "================================================"
+
+        else
+
+          # BAM Merging Step
+          echo "================================================"
+          echo "🚀 STARTING BAM MERGING"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - BAM Files: $(echo "$bam_input" | grep -o '\-i [^ ]*' | sed 's/-i //' | wc -l) files"
+          echo "  - Reference FASTA: $(basename "$ref_fasta_local")"
+          echo "⚙️  Configuration:"
+          echo "  - Threads: $num_threads"
+          echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+          echo "  - Output Format: $align_extension"
+          echo "================================================"
+          
+          # Record start time
+          MERGE_START_TIME=$(date +%s)
+
+          # Count how many -i arguments we have in bam_input
+          bam_count=$(echo "$bam_input" | grep -o '\-i' | wc -l)
+
+          if [ "$bam_count" -eq 1 ] && [ "$cram" == false ]; then
+            # If only one input BAM, just copy it to the output
+            echo "Single BAM file detected, copying to output..."
+            input_bam=$(echo "$bam_input" | sed 's/-i *//' | xargs)
+            echo "Input BAM: $input_bam"
+            if ! cp "$input_bam" "${output_folder}/${sample_name}_sorted${align_extension}"; then
+              echo "ERROR: Failed to copy BAM file with exit code $?"
+              echo "Debug info:"
+              echo "  - Input BAM: $input_bam"
+              echo "  - Output: ${output_folder}/${sample_name}_sorted${align_extension}"
+              exit 1
+            fi
+            if [[ "$align_extension" == ".bam" ]]; then
+              if [ -f "${input_bam}.bai" ]; then
+                cp "${input_bam}.bai" "${output_folder}/${sample_name}_sorted${align_extension}.bai" 2>/dev/null || echo "WARNING: Failed to copy BAM index"
+              fi
+            else
+              if [ -f "${input_bam}.crai" ]; then
+                cp "${input_bam}.crai" "${output_folder}/${sample_name}_sorted${align_extension}.crai" 2>/dev/null || echo "WARNING: Failed to copy CRAM index"
+              fi
+            fi
+          else
+            # Multiple BAMs need to be merged or CRAM output is requested
+            echo "Multiple BAM files detected or CRAM output requested, merging..."
+            echo "BAM count: $bam_count, CRAM: $cram"
+            if ! sentieon driver -r "$ref_fasta_local" -t $num_threads --temp_dir "$workdir" $bam_input --algo ReadWriter \
+              "${output_folder}/${sample_name}_sorted${align_extension}"; then
+              echo "ERROR: BAM merging failed with exit code $?"
+              echo "Debug info:"
+              echo "  - Reference: $ref_fasta_local"
+              echo "  - Threads: $num_threads"
+              echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+              echo "  - Workdir: $workdir"
+              echo "  - BAM input: $bam_input"
+              echo "  - Output: ${output_folder}/${sample_name}_sorted${align_extension}"
+              exit 1
+            fi
+          fi
+
+          output_bam_path="${sample_name}_sorted${align_extension}"
+          
+          # Post-execution logging for BAM Merging
+          MERGE_END_TIME=$(date +%s)
+          MERGE_DURATION=$((MERGE_END_TIME - MERGE_START_TIME))
+          MERGE_DURATION_HOUR=$((MERGE_DURATION / 3600))
+          MERGE_DURATION_MIN=$(((MERGE_DURATION % 3600) / 60))
+          MERGE_DURATION_SEC=$((MERGE_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ BAM MERGING COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${MERGE_DURATION_HOUR}h ${MERGE_DURATION_MIN}m ${MERGE_DURATION_SEC}s"
+          
+          # Calculate merge output size
+          MERGE_TOTAL_SIZE=0
+          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}" ]; then
+            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}" 2>/dev/null || echo "0")))
+          fi
+          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}.bai" ]; then
+            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}.bai" 2>/dev/null || echo "0")))
+          fi
+          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}.crai" ]; then
+            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}.crai" 2>/dev/null || echo "0")))
+          fi
+          
+          # Format total size
+          if [ $MERGE_TOTAL_SIZE -ge 1073741824 ]; then
+            MERGE_TOTAL_GB=$((MERGE_TOTAL_SIZE / 1024 / 1024 / 1024))
+            MERGE_TOTAL_MB=$(((MERGE_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+            MERGE_TOTAL_DECIMAL=$((MERGE_TOTAL_MB * 100 / 1024))
+            MERGE_TOTAL_FORMATTED="${MERGE_TOTAL_GB}.${MERGE_TOTAL_DECIMAL} GB"
+          elif [ $MERGE_TOTAL_SIZE -ge 1048576 ]; then
+            MERGE_TOTAL_MB=$((MERGE_TOTAL_SIZE / 1024 / 1024))
+            MERGE_TOTAL_KB=$(((MERGE_TOTAL_SIZE % (1024 * 1024)) / 1024))
+            MERGE_TOTAL_DECIMAL=$((MERGE_TOTAL_KB * 100 / 1024))
+            MERGE_TOTAL_FORMATTED="${MERGE_TOTAL_MB}.${MERGE_TOTAL_DECIMAL} MB"
+          else
+            MERGE_TOTAL_FORMATTED="${MERGE_TOTAL_SIZE} bytes"
+          fi
+          
+          echo "📁 **Total Output Size: $MERGE_TOTAL_FORMATTED**"
+          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+          echo "================================================"
+        fi
+
+        # Copy metrics to output folder if they were generated
+        if [ $output_metrics == true ]; then
+          mkdir -p "$metrics_dir" || { echo "Failed to create output folder metrics directory"; exit 1; }
+          cp -r "$metrics_dir_local"/* "$metrics_dir/" || { echo "Failed to copy metrics to output folder"; exit 1; }
+        fi
+
+        cp -f ${sample_name}_bwa_run.log "$output_folder"/
+
+        # Final completion summary
+        echo "================================================"
+        echo "✅ BWA-MEM TASK COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Final Output:"
+        echo "  - Output Folder: $output_folder"
+        echo "  - Main BAM/CRAM: $output_bam_path"
+        if [ $output_metrics == true ]; then
+          echo "  - Metrics Directory: ${sample_name}_metrics"
+        fi
+        echo "  - Log File: ${sample_name}_bwa_run.log"
+        echo "💾 **Final Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        echo "================================================"
+
+  - name: update_sample_catalog
+    description: Add BWA-MEM Output to Sample Catalog
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell 
+        set -eu pipefail
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+
+        cd "${output_folder}"
+        if [[ $cram == true ]]; then
+          align_extension=".cram"
+        else
+          align_extension=".bam"
+        fi
+        if [[ $perform_dedup == true ]]; then
+          output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}_deduped${align_extension}"
+        else
+          output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}_sorted${align_extension}"
+        fi
+        gautil client catalog-upsert SampleCatalog \
+          Sample="$sample_name" \
+          BAMPath="$output_bam_path" || \
+          { echo "Failed to update sample catalog"; exit 1; }
+        echo "Updated sample $sample_name with BAM: ${output_bam_path}"
+

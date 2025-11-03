@@ -1,0 +1,163 @@
+name: CYP2D6 Calling with CypCall 
+description: CYP2D6 genotype calling from an alignment file with CypCall
+auto_generate_session_for_account: "{workspaceBot}"
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: true
+
+  - name: input_file
+    label: Input Alignment File
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    create: false
+    list: true
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 12
+
+steps:
+  - name: cypcall
+    description: Run CypCall CYP2D6 Genotyper
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/cypcall:2025-10-01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        workdir="/scratch"
+        run_id="cypcall_$(date +%s%N)"
+        cypcall_output_dir="${workdir}/output"
+
+        case "${GH_WORKSPACE_ASSEMBLY}" in
+            GRCh_37*)
+                assembly="37"
+                ;;
+            *)
+                assembly="38"
+                ;;
+        esac
+
+        # Parse list of input files by cutting list on commas
+        IFS=',' read -ra input_files <<< "$input_file"
+        cypcall_input_file="${workdir}/input_files_${run_id}.txt"
+        for file in "${input_files[@]}"; do
+          echo "$file" >> "$cypcall_input_file"
+        done
+        # Check if more than one input file is provided and sample name is given
+        if [ ${#input_files[@]} -gt 1 ] && [ ! -z "$sample_name" ]; then
+          echo "NOTE: Sample name should not be provided for multiple input files, ignoring sample name"
+        fi
+
+        mkdir -p $cypcall_output_dir
+
+        # CypCall Step
+        echo "================================================"
+        echo "🚀 STARTING CYP2D6 GENOTYPING WITH CYPCALL"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Input Files: ${#input_files[@]} file(s)"
+        for file in "${input_files[@]}"; do
+          echo "    • $file"
+        done
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "  - Run ID: $run_id"
+        echo "⚙️  Configuration:"
+        echo "  - Assembly: $assembly"
+        echo "  - Ambiguity Resolution: lowest_activity"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        echo "================================================"
+
+        # Record start time
+        CYPCALL_START_TIME=$(date +%s)
+
+        # Run analysis for all input files
+        cypcall --input "$cypcall_input_file" \
+            --genome $assembly \
+            --prefix $run_id \
+            --ambiguityResolution lowest_activity \
+            --outDir ${cypcall_output_dir}
+
+        # Post-execution logging
+        CYPCALL_END_TIME=$(date +%s)
+        CYPCALL_DURATION=$((CYPCALL_END_TIME - CYPCALL_START_TIME))
+        CYPCALL_DURATION_MIN=$((CYPCALL_DURATION / 60))
+        CYPCALL_DURATION_SEC=$((CYPCALL_DURATION % 60))
+
+        echo "================================================"
+        echo "✅ CYP2D6 GENOTYPING COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${CYPCALL_DURATION_MIN}m ${CYPCALL_DURATION_SEC}s"
+
+        # Copy output files
+        cp "${cypcall_output_dir}/${run_id}.json" "${output_folder}"
+        cp "${cypcall_output_dir}/${run_id}_sample_manifest.tsv" "${output_folder}"
+
+        echo "📁 Output Files:"
+        echo "  - ${run_id}.json ($(format_file_size "${output_folder}/${run_id}.json"))"
+        echo "  - ${run_id}_sample_manifest.tsv ($(format_file_size "${output_folder}/${run_id}_sample_manifest.tsv"))"
+        echo "================================================"
+
+        output_tsv="${output_folder}/${run_id}_sample_manifest.tsv"
+        echo "cypcall_tsv=\"$output_tsv\"" > result.env
+        cat result.env
+
+  - name: update_sample_catalog
+    description: Add CypCall Output to Sample Catalog
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+
+        cd "${output_folder}"
+        cypcall_tsv=$(ls -t *_sample_manifest.tsv | head -n 1)
+
+        echo "================================================"
+        echo "📊 UPDATING SAMPLE CATALOG"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input File: $cypcall_tsv"
+        echo "================================================"
+
+        sample_count=0
+        while IFS=$'\t' read -r sample pgx_genotypes alt_cyp2d6_genotypes alleles_tested; do
+          if [[ -z "$sample" ]]; then
+            continue
+          fi
+          
+          echo "Uploading catalog data for sample: $sample"
+          gautil client catalog-upsert SampleCatalog \
+              Sample="$sample" \
+              PGxGenotypes="$pgx_genotypes" \
+              AlternativeCYP2D6Genotypes="$alt_cyp2d6_genotypes" \
+              AllelesTested="$alleles_tested"
+          sample_count=$((sample_count + 1))
+        done < <(tail -n +2 "${output_folder}/$cypcall_tsv")
+
+        echo "================================================"
+        echo "✅ SAMPLE CATALOG UPDATE COMPLETED"
+        echo "================================================"
+        echo "📊 Updated $sample_count sample(s)"
+        echo "================================================"

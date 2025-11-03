@@ -1,0 +1,50 @@
+name: Prepare Directories
+description: Prepare output directories
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+
+  - name: folder_name
+    label: Folder Name
+    type: string
+    optional: true
+    help: "The name of the output folder. If left blank, the name of the input folder will be used."
+
+  - name: base_output_folder
+    label: Base Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+agent_requirements:
+  cpu_cores: 0
+  memory_gb: 0
+
+steps:
+  - name: prepare_directories
+    description: Prepare output directories
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # If folder name is not provided, use the name of the input folder
+        if [ -z "$folder_name" ]; then
+            folder_name=$(basename "$input_folder")
+        fi
+
+        # Create output directory
+        output_folder="$base_output_folder/$folder_name"
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+
+        echo "Output folder: $output_folder"
+
+        # Warn if output directory is not empty
+        if [ "$(ls -A "$output_folder")" ]; then
+            echo "WARNING: The output directory '$output_folder' is not empty."
+        fi
+
+        output_folder_rel="${output_folder#$WORKSPACE_DIR/}"
+        echo "output_folder=${output_folder_rel}" > result.env

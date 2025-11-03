@@ -1,0 +1,221 @@
+name: Generate Batch Parameter File
+description: Generate a batch parameter file for Sentieon's TNScope algorithm
+auto_generate_session_for_account: "{workspaceBot}"
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The input folder for the resulting alignment files, VCFs, and (optional) metrics files."
+
+  - name: sample_type
+    label: Sample Type
+    type: enum
+    choices: [Somatic, Family]
+    optional: false
+
+agent_requirements:
+  cpu_cores: 1
+  memory_gb: 1
+
+steps:
+  - name: generate_batch_parameter_file
+    description: Generate a batch parameter file
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        cd /scratch
+
+        # Create output file
+        if [ "$sample_type" == "Family" ]; then
+            # Use a TSV file to store family relationships
+            # This allows us to support comma-separated values in the bam_list column
+            output_file="family_batch_parameters.tsv"
+            echo "input_file" > "$output_file"
+        elif [ "$sample_type" == "Somatic" ]; then 
+            output_file="batch_parameters.csv"
+            echo "tumor_sample_name,normal_sample_name,input_tumor,input_normal" > "$output_file"
+        else
+            echo "Invalid sample type: $sample_type"
+            exit 1
+        fi
+
+        # Find sample names from BAM/CRAM files by taking the prefix before first underscore
+        sample_names=$(find "$input_folder" -maxdepth 1 -type f \( -name "*.bam" -o -name "*.cram" \) | 
+            while read -r file; do
+                basename "$file" | cut -d'_' -f1
+            done | sort -u)
+
+        # Handle somatic or family case
+        case "$sample_type" in 
+            "Somatic")
+                # Track samples that have been processed
+                declare -A processed_tumors
+                declare -A used_normals
+                
+                echo "================================================"
+                echo "PASS 1: Processing tumor samples with matched normals from catalog"
+                echo "================================================"
+                
+                # First pass: Process samples marked as "Tumor" in catalog with a matched normal
+                for sample_name in $sample_names; do
+                    echo "Looking up sample: $sample_name...."
+                    
+                    # Check if sample is marked as tumor in catalog
+                    tumor_status=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Tumor" | tail -n 1 | tr -d '\r\n\t ')
+                    
+                    # Only process if explicitly marked as "Tumor"
+                    if [ "$tumor_status" != "Tumor" ]; then
+                        continue
+                    fi
+                    
+                    echo "  ✓ Sample $sample_name is marked as Tumor in catalog"
+                    
+                    # Look up matched normal sample
+                    normal_sample_name="$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')"
+                    
+                    if [ -z "$normal_sample_name" ]; then
+                        # No matched normal, will handle in second pass
+                        continue
+                    fi
+                    
+                    echo "  ✓ Found matched normal: $normal_sample_name"
+                    
+                    # Find tumor BAM/CRAM file
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}_*.bam" -o -name "${sample_name}_*.cram" \) | head -n 1)
+                    if [ -z "$sample_bam" ]; then
+                        echo "  ✗ No BAM/CRAM file found for tumor sample $sample_name, skipping"
+                        continue
+                    fi
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Find normal BAM/CRAM file
+                    normal_sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${normal_sample_name}_*.bam" -o -name "${normal_sample_name}_*.cram" \) | head -n 1)
+                    if [ -z "$normal_sample_bam" ]; then
+                        echo "  ⚠ No BAM/CRAM file found for normal sample $normal_sample_name, treating as tumor-only"
+                        echo "$sample_name,,$sample_abs," >> "$output_file"
+                        processed_tumors["$sample_name"]=1
+                        continue
+                    fi
+                    normal_sample_abs=$(echo "$normal_sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Add tumor-normal pair
+                    echo "  ✓ Adding tumor-normal pair: $sample_name - $normal_sample_name"
+                    echo "$sample_name,$normal_sample_name,$sample_abs,$normal_sample_abs" >> "$output_file"
+                    
+                    # Track both tumor and normal samples so we don't process them again
+                    processed_tumors["$sample_name"]=1
+                    used_normals["$normal_sample_name"]=1
+                done
+                
+                echo ""
+                echo "================================================"
+                echo "PASS 2: Processing tumor-only samples"
+                echo "================================================"
+                
+                # Second pass: Process samples not already handled and not used as normals
+                for sample_name in $sample_names; do
+                    # Skip if this sample was already processed in pass 1
+                    if [ -n "${processed_tumors[$sample_name]:-}" ]; then
+                        echo "Skipping $sample_name (already processed in pass 1)"
+                        continue
+                    fi
+                    
+                    # Skip if this sample was used as a normal
+                    if [ -n "${used_normals[$sample_name]:-}" ]; then
+                        echo "Skipping $sample_name (used as normal in tumor-normal pair)"
+                        continue
+                    fi
+                    
+                    echo "Processing tumor-only sample: $sample_name...."
+                    
+                    # Find BAM/CRAM file
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}_*.bam" -o -name "${sample_name}_*.cram" \) | head -n 1)
+                    if [ -z "$sample_bam" ]; then
+                        echo "  ✗ No BAM/CRAM file found for sample $sample_name, skipping"
+                        continue
+                    fi
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Add as tumor-only
+                    echo "  ✓ Adding tumor-only sample: $sample_name"
+                    echo "$sample_name,,$sample_abs," >> "$output_file"
+                done
+                
+                echo ""
+                echo "================================================"
+                ;;
+
+            "Family")
+                for sample_name in $sample_names; do
+
+                    # Check if sample is already in batch file
+                    if grep -q "$sample_name" "$output_file"; then
+                        echo "Sample $sample_name already in batch file"
+                        continue
+                    fi
+
+                    # Check if sample is in catalog
+                    echo "Looking up sample: $sample_name...."
+                    echo "Running query Sample:eq:$sample_name"
+
+                    # Look for family relationships in catalog
+                    sample_family=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Mother","Father" --output=tsv | tail -n 1 | tr -d '\r\n ')
+
+                    # If sample family is empty, skip
+                    if [ -z "$sample_family" ]; then
+                        echo "Sample $sample_name has no parents defined in catalog "
+                        echo "Skipping sample"
+                        continue
+                    fi
+                    # Parse family relationships
+                    mother=$(echo "$sample_family" | cut -f1)
+                    father=$(echo "$sample_family" | cut -f2)
+                    echo "Sample $sample_name is in family with mother: $mother and father: $father"
+
+                    # Find BAM for sample, mother, and father
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}_*.bam" -o -name "${sample_name}_*.cram" \) | head -n 1)
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    mother_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${mother}_*.bam" -o -name "${mother}_*.cram" \) | head -n 1)
+                    mother_abs=$(echo "$mother_bam" | sed "s|^$WORKSPACE_DIR||")
+                    father_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${father}_*.bam" -o -name "${father}_*.cram" \) | head -n 1)
+                    father_abs=$(echo "$father_bam" | sed "s|^$WORKSPACE_DIR||")
+
+                    # Check if sample BAM exists (required)
+                    if [ -z "$sample_bam" ]; then
+                        echo "No BAM/CRAM file found for sample $sample_name"
+                        continue
+                    fi
+
+                    # Echo found BAMs and add to output file
+                    echo "Found BAM/CRAM files:"
+                    echo "  Sample: $sample_abs"
+                    if [ ! -z "$mother_bam" ]; then
+                        echo "  Mother: $mother_abs"
+                    else
+                        echo "  Mother: Not found"
+                        mother_abs=""
+                    fi
+                    if [ ! -z "$father_bam" ]; then
+                        echo "  Father: $father_abs"
+                    else
+                        echo "  Father: Not found"
+                        father_abs=""
+                    fi
+                    echo "$sample_abs,$mother_abs,$father_abs" >> "$output_file"
+
+                done
+                ;;
+
+            *)
+                echo "Invalid sample type: $sample_type"
+                exit 1
+                ;;
+        esac
+
+        cp "$output_file" "$input_folder"/
