@@ -1,0 +1,152 @@
+name: Somatic Tumor/Tumor-Normal Calling
+description: Perform alignment and variant calling with BWA-MEM and TNscope
+
+selected_requirements_configuration: Exomes
+requirements_configurations:
+  - name: Panels
+    description: Small FASTQ inputs for gene panels
+  - name: Exomes
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  - name: Genomes
+    description: Large FASTQ inputs for high coverage whole genomes
+
+stages:
+  - name: Prepare Directories
+    description: Prepare output directories
+    task_path: tasks/prepare_directories.task.yaml
+    depends_on: []
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: directory
+        supports_location_mode: 'read_only'
+
+      - name: folder_name
+        label: Folder Name
+        type: string
+        optional: true
+        help: "The name of the output folder. If left blank, the name of the input folder will be used."
+
+      - name: base_output_folder
+        label: Base Output Folder
+        type: directory
+        supports_location_mode: 'no_append'
+        persist_key: "sentieon.base_output_folder"
+
+  - name: Alignment with BWA-MEM
+    description: Align FASTQ files with BWA-MEM
+    task_path: tasks/bwa.task.yaml
+    depends_on:
+      - Prepare Directories
+
+    glob_parameter:
+      label: FASTQ Base Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        parameter: input_folder
+      glob_ex: '**/*_*.f*q.gz'
+      output_parameters:
+        - task_parameter_name: input_folder
+          expression: '${file_directory}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+      
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: file
+        supports_location_mode: 'read_only'
+        optional: true
+        help: "Optionally specify the reference file to align to. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
+        
+      - name: ml_model
+        label: ML Model
+        type: stage
+        stage: Alignment with BWA-MEM
+        help: "The ML model to use for Sentieon's alignment and variant calling.\nOnly Ultima Genomics WGS is supported for somatic data."
+        stage_parameter_expression: "None"
+        value: "None"
+
+      - name: use_prefix
+        label: Use Sample Name as Prefix Filter
+        type: stage
+        stage_parameter_expression: "true"
+        help: "If enabled, only FASTQ files starting with the sample name will be processed. Enable this when the input folder contains FASTQ files from multiple samples. If disabled, all FASTQ files in the input folder are assumed to belong to this sample."
+
+      - name: perform_dedup
+        label: Perform Deduplication (De-Select for Amplicon Data)
+        type: boolean
+        value: "true"
+
+      - name: umi_read_structure
+        label: UMI Read Structure
+        type: string
+        optional: true
+        help: "The read structure of the UMI reads. This is used to determine the UMI length and the position of the UMI in the read. If not provided, UMI data will not be extracted."
+        
+      - name: duplex_umi  
+        label: Duplex UMI
+        type: boolean
+        optional: true
+        help: "If Duplex UMI is enabled, the UMI will be extracted from the duplex reads. If disabled, the UMI will be extracted from the single reads. Ignored if UMI read structure is not provided."
+
+  - name: Generate Batch Parameter File
+    description: Generate a batch parameter file for the alignment and variant calling workflow
+    task_path: tasks/generate_batch_parameter_file.task.yaml
+    depends_on:
+      - Alignment with BWA-MEM
+    
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: ${output_folder}
+
+      - name: sample_type
+        label: Sample Type
+        type: stage
+        stage: Generate Batch Parameter File
+        stage_parameter_expression: "Somatic"
+        value: "Somatic"
+  
+  - name: Variant Calling with TNscope
+    description: Variant calling from an alignment file with Sentieon's DNAscope algorithm
+    task_path: tasks/tnscope.task.yaml
+    depends_on:
+      - Generate Batch Parameter File
+
+    batch_file_parameter:
+      path:
+        base_path:
+          type: stage
+          stage: Prepare Directories
+          parameter_expression: "${output_folder}"
+        file: "batch_parameters.csv"
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ref_fasta}"
+
+      - name: min_init_tumor_lod
+        label: Minimum Tumor Log Odds (Initial Pass)
+        type: float
+        value: "1"
+        help: Minimum tumor log odds in the initial pass. Default value of 1 for high sensitivity in highly mutated samples. Value of 3 can be used for UMI data and to get fewer somatic calls.

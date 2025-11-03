@@ -1,0 +1,214 @@
+name: Comprehensive Whole-Genome Analysis with PGx
+description: Perform alignment, genotyping, and reporting with BWA-MEM, DNAscope, CypCall, and VSPGx. Expected SampleCatalog fields include PGxGenotypes, AlternativeCYP2D6Genotypes, and AllelesTested.
+
+
+selected_requirements_configuration: Exomes
+requirements_configurations:
+  - name: Panels
+    description: Small FASTQ inputs for gene panels
+  - name: Exomes
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  - name: Genomes
+    description: Large FASTQ inputs for high coverage whole genomes
+    
+stages:
+  - name: Prepare Directories
+    description: Prepare output directories
+    task_path: tasks/prepare_directories.task.yaml
+    depends_on: []
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: directory
+        supports_location_mode: 'read_only'
+
+      - name: folder_name
+        label: Folder Name
+        type: string
+        optional: true
+        help: "The name of the output folder. If left blank, the name of the input folder will be used."
+
+      - name: base_output_folder
+        label: Base Output Folder
+        type: directory
+        supports_location_mode: 'no_append'
+        persist_key: "sentieon.base_output_folder"
+
+  - name: Alignment with BWA-MEM
+    description: Align FASTQ files with BWA-MEM
+    task_path: tasks/bwa.task.yaml
+    depends_on:
+      - Prepare Directories
+
+    glob_parameter:
+      label: FASTQ Base Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        parameter: input_folder
+      glob_ex: '**/*_*.f*q.gz'
+      output_parameters:
+        - task_parameter_name: input_folder
+          expression: '${file_directory}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+      
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: ml_model
+        value: "None"
+        label: Machine Learning Model
+        type: enum
+        choices: [None, Element Biosciences WES 2.1, Element Biosciences WGS 2.1, Illumina WES 2.1, Illumina WGS 2.2,
+                  MGI WES 2.1, MGI WGS 2.1, Salus WES 1.0, Salus WGS 1.0, 
+                  Ultima Genomics WGS 1.1]
+        optional: false
+        help: "The Sentieon machine learning model to use for improvements to speed and accuracy for alignment and variant-calling. Leave as None if your data does not match any of the available options. See Sentieon's GitHub page for more information."
+
+      - name: model_base_path
+        label: Sentieon Models Base Path
+        group: Advanced Options
+        type: directory
+        supports_location_mode: 'read_only'
+        optional: true
+        help: "Optionally specify the Sentieon models base path. If not provided, the default models base path will be used. Note that the default models base path must be downloaded and set appropriately. This is only if you select a machine learning model."
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: file
+        supports_location_mode: 'read_only'
+        optional: true
+        help: "Optionally specify the reference file to align to. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
+
+      - name: use_prefix
+        label: Use Sample Name as Prefix Filter
+        type: stage
+        stage_parameter_expression: "true"
+        help: "If enabled, only FASTQ files starting with the sample name will be processed. Enable this when the input folder contains FASTQ files from multiple samples. If disabled, all FASTQ files in the input folder are assumed to belong to this sample."
+
+  - name: Variant Calling with DNAscope 
+    description: Variant calling from an alignment file with Sentieon's DNAscope algorithm
+    task_path: tasks/dnascope.task.yaml
+    depends_on:
+      - Alignment with BWA-MEM
+    
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        # This is a parameter expression because output_folder is written to result.evn by prepare_directories
+        parameter_expression: "${output_folder}"
+      glob_ex: '**/*_*.bam'
+      output_parameters:
+        - task_parameter_name: input_file
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: model_base_path
+        label: Sentieon Models Base Path
+        group: Advanced Options
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${model_base_path}"
+        optional: true
+
+      - name: ml_model
+        label: Machine Learning Model
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ml_model}"
+        optional: false
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ref_fasta}"
+
+      - name: must_call_vcf
+        label: PGX Must-Call VCF
+        type: file
+        supports_location_mode: 'read_only'
+        optional: true
+        help: "The must-call VCF file used for PGx diplotyping downstream. If not provided, it will be ommitted. Mutually exclusive with joint-calling and gVCF output."
+
+      - name: use_must_call_vcf
+        label: Use Must-Call VCF
+        type: stage
+        stage: Variant Calling with DNAscope
+        stage_parameter_expression: "true"
+        help: "Enable must-call VCF for PGx diplotyping."
+
+  - name: CYP2D6 Genotyping with CypCall
+    description: CYP2D6 genotyping from an alignment file with CypCall
+    task_path: tasks/cypcall.task.yaml
+    depends_on:
+      - Alignment with BWA-MEM
+    
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        parameter_expression: "${output_folder}"
+      glob_ex: '**/*_*.bam'
+      output_parameters:
+        - task_parameter_name: input_file
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+  - name: VSPGx Create Project and Report
+    description: Create a project with called variants and generate report
+    task_path: tasks/vspgx.task.yaml
+    depends_on:
+      - Variant Calling with DNAscope
+      - CYP2D6 Genotyping with CypCall
+
+    task_parameters:
+      - name: base_path
+        label: Input Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: project_name
+        label: Project Name
+        type: string
+        optional: true
+        help: "The name of the VarSeq project to create. If not provided, the project name will be derived from the sample name derived from the glob expression."
+
+      - name: project_template
+        label: VarSeq Project Template
+        type: file
+        supports_location_mode: 'read_only'
+        help: "The template to use for the VarSeq project."
+        path: /AppData/VarSeq/User Data/ProjectTemplates/
+
+      - name: overwrite_project
+        label: Overwrite Existing VarSeq Projects
+        type: boolean
+        value: "true"
+        help: "If enabled, existing VarSeq projects with the same name will be overwritten."
