@@ -74,17 +74,11 @@ parameters:
     value: "false"
     help: Set to true to output GVCF format instead of VCF. Mutually exclusive with must-call VCF.
 
-  - name: joint_calling
-    label: Joint Calling
-    type: boolean
-    value: "false"
-    help: Set to true to run joint-calling for each set of inputs. Output defaults to gVCF if selected. Mutually exclusive with must-call VCF.
-
   - name: use_must_call_vcf
     label: Use Must-Call VCF
     type: boolean
     value: "false"
-    help: "Enable must-call VCF for PGx diplotyping downstream. Mutually exclusive with joint-calling and gVCF output."
+    help: "Enable must-call VCF for PGx diplotyping downstream. Mutually exclusive with gVCF output."
 
   - name: must_call_vcf
     label: Must-Call VCF File
@@ -112,23 +106,11 @@ steps:
         num_threads=$AGENT_CPU_CORES
         workdir="/scratch"
 
-        # Collect parameters and validate mutual exclusivity
-        if [[ "$joint_calling" = true ]] && [[ "$use_must_call_vcf" = true ]]; then
-          echo "ERROR: Must-call VCF is not supported for joint calling"
-          echo "Please disable must-call VCF and re-run the task"
-          exit 1
-        fi
-        
+        # Collect parameters and validate mutual exclusivity        
         if [[ "$output_gvcf" = true ]] && [[ "$use_must_call_vcf" = true ]]; then
           echo "ERROR: Must-call VCF is not supported for gVCF output"
           echo "Please disable must-call VCF and re-run the task"
           exit 1
-        fi
-        
-        # Ensure output_gvcf is set to true if joint_calling is true
-        if [[ "$joint_calling" = true ]]; then
-          output_gvcf="true"
-          echo "Joint calling enabled - automatically setting output_gvcf to true"
         fi
 
         # Parse list of input files by cutting list on commas
@@ -246,9 +228,6 @@ steps:
             ;;
 
         esac
-
-        # Initialize GVCF inputs array for joint calling
-        GVCF_INPUTS=()
         
         # Run analysis for each input file
         for input_file in "${input_files[@]}"; do
@@ -299,8 +278,8 @@ steps:
               extra_params="$extra_params --pcr_indel_model none"
           fi
           
-          # Set output format based on joint calling or user preference
-          if [[ "$joint_calling" = true ]] || [[ "$output_gvcf" = true ]]; then
+          # Set output format based on user preference
+          if [[ "$output_gvcf" = true ]]; then
               extra_params="$extra_params --emit_mode gvcf"
               output_suffix="g.vcf.gz"
           else
@@ -321,7 +300,7 @@ steps:
           fi
           echo "📤 Output Configuration:"
           echo "  - Output Folder: $output_folder"
-          if [[ "$joint_calling" = true ]] || [[ "$output_gvcf" = true ]]; then
+          if [[ "$output_gvcf" = true ]]; then
             echo "  - Output Format: GVCF"
           else
             echo "  - Output Format: VCF"
@@ -335,7 +314,6 @@ steps:
           echo "  - Memory: ${AGENT_MEMORY_GB} GB"
           echo "  - PCR Free: $pcr_free"
           echo "  - Output GVCF: $output_gvcf"
-          echo "  - Joint Calling: $joint_calling"
           if [[ "$use_must_call_vcf" = true ]]; then
             echo "  - Use Must-Call VCF: true"
           fi
@@ -455,57 +433,4 @@ steps:
           
           cp -f "${sample_name}_dnascope_run.log" "$output_folder"/
 
-          # Add GVCF to joint calling inputs if joint calling is enabled
-          if [ "$joint_calling" = true ]; then
-            if [ "$use_must_call_vcf" = true ]; then
-              # Must-call mode doesn't support joint calling, but we'll add the merged VCF for consistency
-              GVCF_INPUTS+=("-v" "${output_folder}/${sample_name}_dnascope.vcf.gz")
-            else
-              GVCF_INPUTS+=("-v" "${output_folder}/${sample_name}_dnascope.$output_suffix")
-            fi
-          fi
-
         done
-
-        # ******************************************
-        # Perform joint calling if enabled
-        # ******************************************
-        if [ "$joint_calling" = true ]; then
-          echo "================================================"
-          echo "🚀 STARTING JOINT CALLING WITH GVCFTYPER"
-          echo "================================================"
-          echo "📅 Server Time: $(date)"
-          echo "📁 Input Files:"
-          echo "  - Number of GVCFs: ${#GVCF_INPUTS[@]}"
-          echo "⚙️  Configuration:"
-          echo "  - Threads: $num_threads"
-          echo "================================================"
-          
-          JOINT_START_TIME=$(date +%s)
-          
-          # Use the reference FASTA from the last iteration
-          if [ "${DISABLE_FASTA_COPY_TO_SCRATCH:-false}" = "true" ]; then
-            joint_ref_fasta="$ref_fasta"
-          else
-            joint_ref_fasta="$local_ref_fasta"
-          fi
-          
-          # Run GVCFtyper for joint calling
-          sentieon driver -r "$joint_ref_fasta" --algo GVCFtyper "${GVCF_INPUTS[@]}" \
-            "${output_folder}/joint_called.vcf.gz" || \
-            { echo "GVCFtyper failed"; exit 1; }
-          
-          # Post-execution logging for joint calling
-          JOINT_END_TIME=$(date +%s)
-          JOINT_DURATION=$((JOINT_END_TIME - JOINT_START_TIME))
-          JOINT_DURATION_HOUR=$((JOINT_DURATION / 3600))
-          JOINT_DURATION_MIN=$(((JOINT_DURATION % 3600) / 60))
-          JOINT_DURATION_SEC=$((JOINT_DURATION % 60))
-          
-          echo "================================================"
-          echo "✅ JOINT CALLING COMPLETED SUCCESSFULLY"
-          echo "================================================"
-          echo "⏱️  Execution Time: ${JOINT_DURATION_HOUR}h ${JOINT_DURATION_MIN}m ${JOINT_DURATION_SEC}s"
-          echo "📁 Output File: joint_called.vcf.gz ($(format_file_size "${output_folder}/joint_called.vcf.gz"))"
-          echo "================================================"
-        fi
