@@ -1,0 +1,151 @@
+name: Generate VarSeq Projects
+description: Generate a VarSeq project from aVSBatch file.
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 32
+
+parameters:
+  - name: vsbatch_file
+    label: VSBatch File
+    type: file
+    pattern: "*.vsbatch"
+    supports_location_mode: 'read_only'
+    help: "The VSBatch file to use for the VarSeq project."
+
+steps:
+  - name: vspipeline
+    description: Run VSPipeline
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -euo pipefail
+
+        echo "*************************"
+        echo "Starting VSPipeline Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - vsbatch_file: $vsbatch_file"
+        echo "*************************"
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+
+        if [ ! -f "$vsbatch_file" ]; then
+          echo "Error: VSBatch file not found: $vsbatch_file"
+          exit 1
+        fi
+
+        # Record start time
+        VSPIPELINE_START_TIME=$(date +%s)
+
+        cd ${WORKSPACE_DIR}
+        
+        # Summarize VSBatch file contents
+        echo ""
+        echo "================================================"
+        echo "VSBatch File Summary"
+        echo "================================================"
+        
+        # Parse multiverse imports
+        multiverse_line=$(grep "^import files=" "$vsbatch_file" 2>/dev/null | head -1 || true)
+        if [ -n "$multiverse_line" ]; then
+            # Extract files portion and count quoted file paths (format: "file1","file2","file3")
+            files_portion=$(echo "$multiverse_line" | sed -n 's/.*files=\(.*\)/\1/p' || echo "")
+            if [ -n "$files_portion" ]; then
+                multiverse_files=$(echo "$files_portion" | grep -o '"[^"]*"' | wc -l || echo "0")
+                echo "  • Importing $multiverse_files multiverse file(s)"
+                # Extract and display file paths
+                echo "$files_portion" | grep -o '"[^"]*"' | sed 's/"//g' | while read -r file_path; do
+                    echo "    - $file_path"
+                done || true
+            fi
+        fi
+        
+        # Parse CNV imports
+        cnv_line=$(grep "^update_cnv_import" "$vsbatch_file" 2>/dev/null | head -1 || true)
+        if [ -n "$cnv_line" ]; then
+            # Extract files portion (before table_id=)
+            files_portion=$(echo "$cnv_line" | sed -n 's/.*files=\(.*\) table_id=.*/\1/p' || echo "")
+            if [ -n "$files_portion" ]; then
+                cnv_files=$(echo "$files_portion" | grep -o '"[^"]*"' | wc -l || echo "0")
+                cnv_table=$(echo "$cnv_line" | sed -n 's/.*table_id="\([^"]*\)".*/\1/p' || echo "")
+                if [ -n "$cnv_table" ]; then
+                    echo "  • Importing $cnv_files CNV file(s) into table \"$cnv_table\""
+                    # Extract and display file paths
+                    echo "$files_portion" | grep -o '"[^"]*"' | sed 's/"//g' | while read -r file_path; do
+                        echo "    - $file_path"
+                    done || true
+                fi
+            fi
+        fi
+        
+        # Parse BND imports
+        bnd_line=$(grep "^update_bnd_import" "$vsbatch_file" 2>/dev/null | head -1 || true)
+        if [ -n "$bnd_line" ]; then
+            # Extract files portion (before table_id=)
+            files_portion=$(echo "$bnd_line" | sed -n 's/.*files=\(.*\) table_id=.*/\1/p' || echo "")
+            if [ -n "$files_portion" ]; then
+                bnd_files=$(echo "$files_portion" | grep -o '"[^"]*"' | wc -l || echo "0")
+                bnd_table=$(echo "$bnd_line" | sed -n 's/.*table_id="\([^"]*\)".*/\1/p' || echo "")
+                if [ -n "$bnd_table" ]; then
+                    echo "  • Importing $bnd_files breakend file(s) into table \"$bnd_table\""
+                    # Extract and display file paths
+                    echo "$files_portion" | grep -o '"[^"]*"' | sed 's/"//g' | while read -r file_path; do
+                        echo "    - $file_path"
+                    done || true
+                fi
+            fi
+        fi
+        
+        # Parse region imports
+        region_line=$(grep "^update_region_import" "$vsbatch_file" 2>/dev/null | head -1 || true)
+        if [ -n "$region_line" ]; then
+            # Extract files portion (before table_id=)
+            files_portion=$(echo "$region_line" | sed -n 's/.*files=\(.*\) table_id=.*/\1/p' || echo "")
+            if [ -n "$files_portion" ]; then
+                region_files=$(echo "$files_portion" | grep -o '"[^"]*"' | wc -l || echo "0")
+                region_table=$(echo "$region_line" | sed -n 's/.*table_id="\([^"]*\)".*/\1/p' || echo "")
+                if [ -n "$region_table" ]; then
+                    echo "  • Importing $region_files region file(s) into table \"$region_table\""
+                    # Extract and display file paths
+                    echo "$files_portion" | grep -o '"[^"]*"' | sed 's/"//g' | while read -r file_path; do
+                        echo "    - $file_path"
+                    done || true
+                fi
+            fi
+        fi
+        
+        echo "================================================"
+        echo ""
+        
+
+        echo "================================================"
+        echo "Running VSPipeline"
+        echo "================================================"
+
+        vspipeline -c get_version
+        vspipeline -c batch file="$vsbatch_file" > /dev/null 2>/scratch/vspipeline_error.log || \
+            { echo "VSPipeline failed"; \
+              echo "Error log:"; \
+              cat /scratch/vspipeline_error.log; \
+              exit 1; }
+
+        # Record end time and calculate duration
+        VSPIPELINE_END_TIME=$(date +%s)
+        VSPIPELINE_DURATION=$((VSPIPELINE_END_TIME - VSPIPELINE_START_TIME))
+        VSPIPELINE_DURATION_HOUR=$((VSPIPELINE_DURATION / 3600))
+        VSPIPELINE_DURATION_MIN=$(((VSPIPELINE_DURATION % 3600) / 60))
+        VSPIPELINE_DURATION_SEC=$((VSPIPELINE_DURATION % 60))
+
+        echo "================================================"
+        echo "✅ VSPIPELINE COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${VSPIPELINE_DURATION_HOUR}h ${VSPIPELINE_DURATION_MIN}m ${VSPIPELINE_DURATION_SEC}s"
+        echo "================================================"
+        echo ""
+        echo "*************************"
+        echo "VSPipeline Task completed successfully"
+        echo "*************************"

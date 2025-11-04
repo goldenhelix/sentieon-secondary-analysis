@@ -146,3 +146,48 @@ stages:
         type: boolean
         value: "false"
         help: Set to true to output GVCF format instead of VCF. Mutually exclusive with must-call VCF.
+
+  - name: Generate VSBatch File for VSPipeline
+    description: Generate a VSBatch file for the VSPipeline
+    task_path: tasks/generate_vsbatch.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Variant Calling with DNAscope
+
+    task_parameters:
+      - name: input_folder  
+        label: Input Folder
+        type: stage
+        stage: Variant Calling with DNAscope
+        stage_parameter_expression: "${output_folder}"
+
+      - name: vsproject_template
+        label: VarSeq Project Template
+        type: file
+        supports_location_mode: 'read_only'
+        help: "The template to use for the VarSeq project."
+        path: AppData/VarSeq/User Data/ProjectTemplates/
+
+      - name: overwrite_project
+        label: Overwrite Existing VarSeq Projects
+        type: boolean
+        value: "true"
+        help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+  - name: Create VarSeq Project with VSPipeline
+    description: Create a VarSeq project with the VSPipeline based on the VSBatch file
+    task_path: tasks/vspipeline.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Generate VSBatch File for VSPipeline
+
+    glob_parameter:
+      label: Input Folder
+      path:
+        type: stage
+        stage: Generate VSBatch File for VSPipeline
+        parameter: input_folder
+      glob_ex: '**/*.vsbatch'
+      output_parameters:
+        - task_parameter_name: vsbatch_file
+          expression: '${0}'

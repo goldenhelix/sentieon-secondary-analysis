@@ -1,0 +1,158 @@
+name: Generate VSBatch File
+description: Generate VSBatch files for each set of related samplesbased on the output of the PacBio WDL Somatic Workflow
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 8
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+    help: "The input folder for the resulting alignment files, VCFs, and (optional) metrics files."
+
+  - name: vsproject_template
+    label: VarSeq Project Template
+    type: file
+    supports_location_mode: 'read_only'
+    help: "The template to use for the VarSeq project."
+    path: AppData/VarSeq/User Data/ProjectTemplates/
+
+  - name: overwrite_project
+    label: Overwrite Existing VarSeq Projects 
+    type: boolean
+    value: "true"
+    help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+steps:
+  - name: generate_vsbatch_files
+    description: Generate VSBatch files for each set of related samples
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail  
+
+        # Implementation notes:
+        # - Uses vspipeline_inputs.json file to determine samples and file paths
+        # - Queries sample catalog for tumor/normal relationships
+        # - Groups related samples and generates VSBatch files
+        # - Supports multiverse, CNV, breakend, and region file imports based on template capabilities
+
+        #############################
+        # Set up environment
+        #############################
+
+        cd /scratch
+
+        #############################
+        # Find related samples
+        #############################
+
+        # Look for vspipeline_inputs.json file in the input folder
+        echo "Searching for vspipeline_inputs.json in $input_folder..."
+
+        vspipeline_inputs="${input_folder}/vspipeline_inputs.json"
+        if [ ! -f "$vspipeline_inputs" ]; then
+            echo "Error: vspipeline_inputs.json file not found in $input_folder"
+            exit 1
+        fi
+
+        echo "Found vspipeline_inputs.json: $vspipeline_inputs"
+
+        # Extract sample names from the JSON file
+        echo "Extracting sample names from vspipeline_inputs.json..."
+
+        sample_names=$(jq -r '.samples | keys[]' "$vspipeline_inputs")
+
+        echo "Found samples:"
+        echo "$sample_names" | while read -r sample; do
+            echo "• $sample"
+        done
+
+        # For each sample, query its metadata from sample catalog
+
+        echo "Querying sample catalog for samples..."
+
+        # Create output TSV file with headers
+        echo -e "sample\ttumor\tnormal_sample" > sample_metadata.tsv
+
+        for sample_name in $sample_names; do
+            echo "Querying sample catalog for sample: $sample_name..."
+            echo "Running query Sample:eq:$sample_name"
+
+            # Query tumor status
+            tumor=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="Tumor" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Query normal sample
+            normal_sample=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" \
+                --fields="NormalSample" \
+                --output=tsv 2>/dev/null | tail -n 1 | tr -d '\r\n\t ')
+
+            # Check if any data was found
+            if [[ -z "$tumor" && -z "$normal_sample" ]]; then
+                echo "Sample $sample_name not found in catalog as primary entry"
+                echo "Checking if this sample appears as a matched normal for any tumor samples..."
+                
+                # Query if this sample appears as NormalSample for any other tumor samples
+                tumor_samples=$(gautil client catalog-export SampleCatalog NormalSample:eq:"$sample_name" \
+                    --fields="Sample" \
+                    --output=tsv 2>/dev/null | tail -n +2)
+                
+                if [[ -n "$tumor_samples" ]]; then
+                    echo "Found $sample_name as matched normal for tumor sample(s):"
+                    while IFS= read -r tumor_sample; do
+                        tumor_sample=$(echo "$tumor_sample" | tr -d '\r\n\t ')
+                        if [[ -n "$tumor_sample" ]]; then
+                            echo "  • $tumor_sample"
+                        fi
+                    done <<< "$tumor_samples"
+                    # Add entry for this sample with empty tumor/normal_sample
+                    # The Python grouping logic will connect it to the tumor samples via the
+                    # tumor samples' metadata (where this sample appears as NormalSample)
+                    echo -e "$sample_name\t\t" >> sample_metadata.tsv
+                else
+                    echo "Sample $sample_name not found in catalog at all"
+                    continue
+                fi
+            else
+                # Append results to TSV
+                echo -e "$sample_name\t$tumor\t$normal_sample" >> sample_metadata.tsv
+            fi
+            
+            # Print results to console for logging
+            echo "Results for sample $sample_name:"
+            echo "• Tumor: $tumor"
+            echo "• Normal sample: $normal_sample"
+            
+        done
+
+        echo "Sample metadata saved to sample_metadata.tsv"
+        echo "Finding related samples..."
+
+        python3 "${TASK_DIR}/utils/vspipeline_utilities.py" find-relationships --samples sample_metadata.tsv --output related_samples.csv
+
+        #############################
+        # For each set of related samples, generate a VSBatch file
+        #############################
+
+        python3 "${TASK_DIR}/utils/vspipeline_utilities.py" \
+            generate-vsbatch \
+            --template "$vsproject_template" \
+            --samples "related_samples.csv" \
+            --sample_files "$vspipeline_inputs" \
+            --overwrite_project "$overwrite_project"
+
+        echo "VSBatch files generated for all related samples"
+
+        #############################
+        # Copy VSBatch files to input folder
+        #############################
+
+        echo "Copying VSBatch files to input folder..."
+        cp -r ./*.vsbatch "$input_folder"
+
+        echo "VSBatch files copied to input folder"
