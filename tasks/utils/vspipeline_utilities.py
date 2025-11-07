@@ -9,7 +9,7 @@ This script provides four main modes:
 4. Update vspipeline JSON - creates or updates vspipeline_inputs.json with sample file information
 
 Usage:
-    python vspipeline_utilities.py find-relationships --samples <sample_file.txt>
+    python vspipeline_utilities.py find-relationships --samples <sample_file.txt> [--cohort]
     python vspipeline_utilities.py generate-vsbatch --template <template.vsproject-template> --samples <sample_file.txt>
     python vspipeline_utilities.py update-cnv-file --input <cnv_file.cns> --output <cnv_file_updated.cns>
     python vspipeline_utilities.py update-vspipeline-json --input_dir <directory> --sample <sample_name> --file <file_path> --file_type <multiverse|cnv|bnd|region>
@@ -410,15 +410,19 @@ def _output_sample_groups(relationships: Dict[str, List[str]], output_file: str)
     print(f"Results written to: {output_file}")
 
 
-def find_sample_relationships(sample_file: str, output_file: str) -> None:
+def find_sample_relationships(sample_file: str, output_file: str, cohort: bool = False) -> None:
     """
     Find sample relationships based on metadata in the provided sample file.
     
     Args:
         sample_file: Path to a TSV file containing sample metadata
         output_file: Path to output CSV file for sample groups
+        cohort: If True, put all samples into a single cohort group instead of finding relationships
     """
-    print(f"Finding sample relationships from: {sample_file}")
+    if cohort:
+        print(f"Creating cohort group from: {sample_file}")
+    else:
+        print(f"Finding sample relationships from: {sample_file}")
     
     if not os.path.exists(sample_file):
         print(f"Error: Sample file '{sample_file}' does not exist.")
@@ -429,15 +433,23 @@ def find_sample_relationships(sample_file: str, output_file: str) -> None:
         print(f"Found {len(all_samples)} samples")
         
         relationships = {}
-        processed_samples = set()
         
-        for sample in all_samples:
-            if sample in processed_samples:
-                continue
+        if cohort:
+            # Put all samples into a single cohort group
+            if all_samples:
+                relationships['cohort'] = sorted(all_samples)
+                print(f"Created single cohort group with {len(all_samples)} samples")
+        else:
+            # Find relationships between samples
+            processed_samples = set()
             
-            current_group = _find_connected_samples(sample, sample_data, all_samples, processed_samples)
-            group_key = min(current_group)
-            relationships[group_key] = sorted(current_group)
+            for sample in all_samples:
+                if sample in processed_samples:
+                    continue
+                
+                current_group = _find_connected_samples(sample, sample_data, all_samples, processed_samples)
+                group_key = min(current_group)
+                relationships[group_key] = sorted(current_group)
         
         _output_sample_groups(relationships, output_file)
         
@@ -866,6 +878,9 @@ Examples:
   # Find sample relationships
   python vspipeline_utilities.py find-relationships --samples samples.tsv --output sample_groups.csv
   
+  # Create a single cohort group from all samples
+  python vspipeline_utilities.py find-relationships --samples samples.tsv --output sample_groups.csv --cohort
+  
   # Generate VSBatch files
   python vspipeline_utilities.py generate-vsbatch --template template.vsproject-template --samples sample_groups.csv --sample_files sample_data.json
   
@@ -894,6 +909,11 @@ Examples:
         '--output',
         required=True,
         help='Path to output CSV file for sample groups'
+    )
+    find_parser.add_argument(
+        '--cohort',
+        action='store_true',
+        help='Put all samples into a single cohort group instead of finding relationships'
     )
     
     # Generate VSBatch mode
@@ -976,7 +996,7 @@ Examples:
     
     # Execute the appropriate mode
     if args.mode == 'find-relationships':
-        find_sample_relationships(args.samples, args.output)
+        find_sample_relationships(args.samples, args.output, cohort=args.cohort)
     elif args.mode == 'generate-vsbatch':
         # Convert string to boolean
         overwrite = args.overwrite_project.lower() in ('true', '1', 'yes', 'on')

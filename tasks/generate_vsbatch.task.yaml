@@ -26,6 +26,12 @@ parameters:
     value: "true"
     help: "If enabled, existing VarSeq projects with the same name will be overwritten."
 
+  - name: cohort
+    label: Cohort Mode
+    type: boolean
+    value: "false"
+    help: "If enabled, put all samples into a single cohort group instead of finding relationships between them."
+
 steps:
   - name: generate_vsbatch_files
     description: Generate VSBatch files for each set of related samples
@@ -133,7 +139,14 @@ steps:
         echo "Sample metadata saved to sample_metadata.tsv"
         echo "Finding related samples..."
 
-        python3 "${TASK_DIR}/utils/vspipeline_utilities.py" find-relationships --samples sample_metadata.tsv --output related_samples.csv
+        # Build find-relationships command with optional --cohort flag
+        find_rel_cmd="python3 \"${TASK_DIR}/utils/vspipeline_utilities.py\" find-relationships --samples sample_metadata.tsv --output related_samples.csv"
+        if [ "$cohort" == "true" ]; then
+            find_rel_cmd="$find_rel_cmd --cohort"
+            echo "Using cohort mode: all samples will be grouped together"
+        fi
+        
+        eval "$find_rel_cmd"
 
         #############################
         # For each set of related samples, generate a VSBatch file

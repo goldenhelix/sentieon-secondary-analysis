@@ -140,9 +140,25 @@ steps:
         VSPIPELINE_DURATION_MIN=$(((VSPIPELINE_DURATION % 3600) / 60))
         VSPIPELINE_DURATION_SEC=$((VSPIPELINE_DURATION % 60))
 
+        # Extract project path from vsbatch file
+        project_create_line=$(grep "^project_create" "$vsbatch_file" 2>/dev/null | head -1 || true)
+        if [ -n "$project_create_line" ]; then
+            # Extract the first quoted argument (project path)
+            # Handle both "path" and "${variable}" formats
+            project_path=$(echo "$project_create_line" | sed -n 's/^project_create[[:space:]]*"\([^"]*\)".*/\1/p' || echo "")
+            if [ -z "$project_path" ]; then
+                # Try to extract unquoted path or variable
+                project_path=$(echo "$project_create_line" | awk '{print $2}' | sed 's/"//g' || echo "")
+            fi
+        fi
+
         echo "================================================"
         echo "✅ VSPIPELINE COMPLETED SUCCESSFULLY"
         echo "================================================"
+        if [ -n "$project_path" ]; then
+            echo "📁 Project Path: $project_path"
+            echo "================================================"
+        fi
         echo "⏱️  Execution Time: ${VSPIPELINE_DURATION_HOUR}h ${VSPIPELINE_DURATION_MIN}m ${VSPIPELINE_DURATION_SEC}s"
         echo "================================================"
         echo ""
