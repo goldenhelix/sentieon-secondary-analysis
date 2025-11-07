@@ -1,0 +1,349 @@
+name: Sentieon DNAscope Long-Read
+description: Variant calling with HiFi or ONT aligned BAM inputs
+
+parameters:
+  - name: input_file
+    label: BAM Input
+    help: Aligned BAM PacBio HiFi or ONT file
+    type: file
+    supports_location_mode: 'read_only'
+
+  - name: tech
+    label: Sequencing Technology
+    help: Sequencing technology used to generate the reads
+    type: enum
+    choices: ["HiFi", "ONT"]
+    value: "HiFi"
+
+  - name: sample_name
+    label: Sample Name (Optional)
+    type: string
+    optional: true
+
+  - name: output_folder
+    label: Output Folder
+    help: Folder where output files will be written
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    optional: true
+    supports_location_mode: 'read_only'
+    help: Reference file to use for variant calling. If not provided, the default reference file will be used.
+
+  - name: bed_file
+    label: Region BED File
+    help: Limit variant calling to the intervals inside the BED file
+    type: file
+    optional: true
+    supports_location_mode: 'read_only'
+
+  - name: haploid_bed
+    label: Haploid Regions BED
+    help: BED file of haploid regions for haploid variant calling
+    type: file
+    optional: true
+    supports_location_mode: 'read_only'
+
+  - name: model_base_path
+    group: Advanced Options
+    label: Sentieon Model Base Path
+    help: Base path for Sentieon model bundles
+    type: directory
+    supports_location_mode: 'read_only'
+
+  - name: gvcf
+    group: Advanced Options
+    label: Generate gVCF
+    help: Generate a gVCF output file along with the VCF
+    type: boolean
+    value: "true"
+
+  - name: skip_small_variants
+    group: Advanced Options
+    label: Skip Small Variants
+    help: Skip small variant (SNV/indel) calling
+    type: boolean
+    value: "false"
+
+  - name: skip_mosdepth
+    group: Advanced Options
+    label: Skip Mosdepth QC
+    help: Skip QC with mosdepth
+    type: boolean
+    value: "false"
+
+  - name: dry_run
+    group: Advanced Options
+    label: Dry Run
+    help: Run in dry run mode without executing analysis
+    type: boolean
+    value: "false"
+
+
+agent_requirements:
+  cpu_cores: 32
+  memory_gb: 64
+
+steps:
+  - name: secondary
+    description: Run secondary analysis
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+        licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
+        # if [ "$licsrvr" != "0" ]; then
+        #   echo "License server not responding"
+        #   exit 1
+        # else 
+        #   echo "License server responding"
+        # fi
+
+        # Agent setup
+        echo "*************************"
+        echo "Agent allocated..."
+        echo -e "\tCPU Cores: $AGENT_CPU_CORES"
+        mem_gb=$((AGENT_MEMORY_GB - 2))
+        echo -e "\tAvailable Memory: ${mem_gb}GB"
+        echo "*************************"
+
+        # Set BWA memory for Sentieon CLI
+        export bwt_max_mem="${mem_gb}G"
+
+        # Parameter validation
+        pattern=" | "
+        if [[ "$sample_name" =~ "$pattern" ]]; then
+          echo "Sample name should not contain whitespace"
+          exit 1
+        fi
+
+        # Create output directory if it doesn't exist
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+
+        # Use scratch directory for temporary files
+        workdir="/scratch"
+        mkdir -p "$workdir" || { echo "Failed to create work directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
+        
+        # Set up logging
+        logfile=${sample_name}_dnascope_run.log
+        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+
+        # Get sample name from input BAM file (without extension)
+        input_basename=$(basename "$input_file")
+        
+        # If sample name is not set, get it as the basename of inputfile
+        if [ -z "$sample_name" ]; then
+          sample_name=${input_basename%%.*}
+        fi
+        echo "Sample name: $sample_name"
+
+        # Select reference file
+        echo "Selecting reference file..."
+        if [ -z "$ref_fasta" ]; then
+          echo "No reference file provided, using default reference file..."
+          ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+          if [ ! -f "$ref_fasta" ]; then
+            echo "The default reference file does not exist at $ref_fasta"
+            echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+            exit 1
+          fi
+        fi
+        ref_fasta_basename=$(basename "$ref_fasta")
+        
+        # Select model base path
+        if [ -z "$model_base_path" ]; then
+          echo "No model base path provided, using default model base path..."
+          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+          if [ ! -d "$model_base_path" ]; then
+            echo "The default models do not exist at $model_base_path"
+            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+            exit 1
+          fi
+        fi
+
+        # Select model bundle based on technology
+        if [ "$tech" = "HiFi" ]; then
+          model_file="${model_base_path}/DNAscopePacBio2.1.bundle"
+        elif [ "$tech" = "ONT" ]; then
+          model_file="${model_base_path}/DNAscopeONT2.1.bundle"
+        else
+          echo "Error: Unknown technology '$tech'"
+          exit 1
+        fi
+        
+        if [ ! -f "$model_file" ]; then
+          echo "Model bundle does not exist at $model_file. Please run the task Download Sentieon Models to download the models and then re-run this task"
+          exit 1
+        fi
+        
+        echo "================================================"
+        echo "🚀 STARTING SENTIEON DNASCOPE LONG-READ ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Input BAM: $(basename "$input_file") ($(format_file_size "$input_file"))"
+        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+        if [ -n "$bed_file" ]; then
+          echo "  - BED File: $(basename "$bed_file") ($(format_file_size "$bed_file"))"
+        fi
+        if [ -n "$haploid_bed" ]; then
+          echo "  - Haploid BED: $(basename "$haploid_bed") ($(format_file_size "$haploid_bed"))"
+        fi
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "  - Output VCF: ${sample_name}.vcf.gz"
+        echo "⚙️  Configuration:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Technology: $tech"
+        echo "  - Model Bundle: $(basename "$model_file")"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Memory: ${mem_gb}GB"
+        echo "  - Generate gVCF: $gvcf"
+        echo "  - Skip Small Variants: $skip_small_variants"
+        echo "  - Skip Mosdepth: $skip_mosdepth"
+        echo "================================================"
+        
+        # Record start time
+        DNASCOPE_START_TIME=$(date +%s)
+
+        # Copy input file to work directory for better performance
+        echo "Copying input file to work directory..."
+        local_input_file="$workdir/${input_basename}"
+        start_time=$SECONDS
+        cp "$input_file"* "$workdir"/ || { echo "Failed to copy input file"; exit 1; }
+        echo "Input file copied to $local_input_file in $((SECONDS - start_time)) seconds"
+
+        # Copy reference file to work directory
+        echo "Copying reference file to work directory..."
+        local_ref_fasta="$workdir/${ref_fasta_basename}"
+        start_time=$SECONDS
+        cp "$ref_fasta" "$local_ref_fasta" || { echo "Failed to copy reference FASTA"; exit 1; }
+        cp "$ref_fasta".fai "$local_ref_fasta".fai || { echo "Failed to copy reference FASTA index"; exit 1; }
+        echo "Reference file copied to $local_ref_fasta in $((SECONDS - start_time)) seconds"
+        
+        # Define output file name based on sample name
+        output_file="${output_folder}/${sample_name}.vcf.gz"
+        echo "Output will be written to: $output_file"
+
+        # Create temporary output directory
+        mkdir -p "$workdir/output" || { echo "Failed to create temporary output directory"; exit 1; }
+        temp_output_file="$workdir/output/${sample_name}.vcf.gz"
+
+        # Build command arguments
+        cmd_args=(
+          sentieon-cli dnascope-longread
+          -r "$local_ref_fasta"
+          -i "$local_input_file"
+          -m "$model_file"
+          -t $AGENT_CPU_CORES
+          --tech "$tech"
+          --skip-cnv
+          --skip-svs
+        )
+
+        # Add optional arguments
+        if [ -n "$bed_file" ]; then
+          cmd_args+=(-b "$bed_file")
+        fi
+        
+        if [ -n "$haploid_bed" ]; then
+          cmd_args+=(--haploid-bed "$haploid_bed")
+        fi
+        
+        if [ "$gvcf" = "true" ]; then
+          cmd_args+=(--gvcf)
+        fi
+        
+        if [ "$dry_run" = "true" ]; then
+          cmd_args+=(--dry-run)
+        fi
+        
+        if [ "$skip_small_variants" = "true" ]; then
+          cmd_args+=(--skip-small-variants)
+        fi
+
+        if [ "$skip_mosdepth" = "true" ]; then
+          cmd_args+=(--skip-mosdepth)
+        fi
+        
+        cmd_args+=("$temp_output_file")
+
+        echo "Starting DNAscope analysis..."
+        echo "Command: ${cmd_args[*]}"
+
+        # Run the analysis
+        "${cmd_args[@]}" || { echo "DNAscope analysis failed"; exit 1; }
+
+        # Move all output files to the destination folder
+        echo "Moving output files to destination folder..."
+        mv "$workdir/output"/* "$output_folder"/ || { echo "Failed to move output files"; exit 1; }
+        
+        # Clean up work directory
+        rm -f "$local_ref_fasta" "$local_ref_fasta".fai "$local_input_file"*
+        
+        # Post-execution logging for DNAscope
+        DNASCOPE_END_TIME=$(date +%s)
+        DNASCOPE_DURATION=$((DNASCOPE_END_TIME - DNASCOPE_START_TIME))
+        DNASCOPE_DURATION_HOUR=$((DNASCOPE_DURATION / 3600))
+        DNASCOPE_DURATION_MIN=$(((DNASCOPE_DURATION % 3600) / 60))
+        DNASCOPE_DURATION_SEC=$((DNASCOPE_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ DNASCOPE LONG-READ ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${DNASCOPE_DURATION_HOUR}h ${DNASCOPE_DURATION_MIN}m ${DNASCOPE_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        for output_file in "$output_folder"/*; do
+          if [ -f "$output_file" ]; then
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
+          fi
+        done
+        echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "================================================"
+        
+        # Update vspipeline_inputs.json with the output VCF file
+        echo "Updating vspipeline_inputs.json..."
+        if ! command -v python3 &> /dev/null; then
+          echo "python3 not found, attempting to install..."
+          # Try to install python3 if available (works on Debian/Ubuntu-based containers)
+          if command -v apt-get &> /dev/null; then
+            apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null 2>&1 || true
+          elif command -v yum &> /dev/null; then
+            yum install -y -q python3 > /dev/null 2>&1 || true
+          fi
+        fi
+        
+        if command -v python3 &> /dev/null; then
+          # Update vspipeline_inputs.json with the output VCF file
+          vcf_file="${output_folder}/${sample_name}.vcf.gz"
+          if [ -f "$vcf_file" ]; then
+            python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$sample_name" \
+              --file "$vcf_file" \
+              --file_type multiverse || \
+              { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
+          else
+            echo "Warning: VCF file not found at $vcf_file, skipping vspipeline_inputs.json update"
+          fi
+        else
+          echo "Warning: python3 not available in Docker container, skipping vspipeline_inputs.json update"
+          echo "The JSON file can be updated manually or via a separate task"
+        fi
+        
+        # Copy log file to output folder
+        cp -f "$logfile" "$output_folder"/ || { echo "Failed to copy log file"; exit 1; }
+        
+        cd "$TASK_DIR"

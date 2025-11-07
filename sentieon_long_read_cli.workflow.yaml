@@ -1,0 +1,214 @@
+name: Long-Read Germline Variant Calling
+description: Perform alignment (Sentieon Minimap2) and variant calling (Sentieon CLI) for long read data
+
+stages:
+
+  - name: Prepare Directories
+    description: Prepare output directories
+    task_path: "tasks/prepare_directories_batch_file.task.yaml"
+    depends_on: []
+    task_parameters:
+      - name: input_tsv
+        label: Batch TSV File
+        type: file
+        pattern: '*.tsv'
+        help: "The batch file containing a list of FASTQ or uBAM (unaligned BAM), including failed target uBAMs, files to align and their associated samples."
+
+      - name: folder_name
+        label: Folder Name
+        type: string
+        optional: true
+        help: "The name of the output folder. If left blank, the name of the folder containing the batch TSV file will be used."
+
+      - name: base_output_folder
+        label: Base Output Folder
+        type: directory
+        supports_location_mode: 'no_append'
+        persist_key: "sentieon.base_output_folder"
+
+  - name: Alignment with Minimap2
+    description: Align long read data with Minimap2
+    task_path: "tasks/sentieon_minimap2.task.yaml"
+    depends_on: 
+      - Prepare Directories
+
+    batch_file_parameter:
+      label: Alignment Files TSV
+      path:
+        base_path:
+          type: stage
+          stage: Prepare Directories
+          parameter: input_tsv
+        file: ''
+      help: "The batch file containing a list of FASTQ or uBAM (unaligned BAM), including failed target uBAMs, files to align and their associated samples."
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: tech
+        label: Sequencing Technology
+        type: enum
+        choices: ["HiFi", "ONT"]
+        value: "HiFi"
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: file
+        optional: true
+        help: Reference file to use for alignment. If not provided, the default reference file will be used.
+        supports_location_mode: 'read_only'
+
+      - name: model_base_path
+        label: Sentieon Models Base Path
+        type: directory
+        optional: true
+        help: Path to the Sentieon models base directory. If not provided, the default models will be used.
+        supports_location_mode: 'read_only'
+
+  - name: Merge Minimap2 BAMs
+    description: Merge multiple Minimap2 BAM files for each sample
+    task_path: "tasks/merge_minimap2_bams.task.yaml"
+    depends_on:
+      - Alignment with Minimap2
+
+    glob_parameter:
+      label: Alignment Output Folder
+      path:
+        type: stage
+        stage: Alignment with Minimap2
+        parameter: output_folder
+      glob_ex: '**/*.*.minimap2.bam'
+      output_parameters:
+        - task_parameter_name: sample_name
+          expression: '${2}'
+      help: The alignment output folders containing Minimap2 BAM files to merge per sample.
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Alignment with Minimap2
+        stage_parameter_expression: '${output_folder}'
+        supports_location_mode: 'read_only'
+
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with Minimap2
+        stage_parameter_expression: '${output_folder}'
+        supports_location_mode: 'no_append'
+
+  - name: Variant Calling with Sentieon CLI
+    description: Call variants with Sentieon CLI
+    task_path: "tasks/sentieon_cli_long_read.task.yaml"
+    depends_on: ["Merge Minimap2 BAMs"]
+
+    glob_parameter:
+      label: Merged Alignment Folder
+      path:
+        type: stage
+        stage: Merge Minimap2 BAMs
+        parameter: output_folder
+      glob_ex: '**/*.minimap2.bam'
+      output_parameters:
+        - task_parameter_name: input_file
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+
+    task_parameters:
+      - name: gvcf
+        label: Generate gVCF
+        help: Generate a gVCF output file along with the VCF
+        type: boolean
+        value: "true"
+
+      - name: skip_small_variants
+        label: Skip Small Variants
+        help: Skip small variant (SNV/indel) calling
+        type: boolean
+        value: "false"
+
+      - name: skip_mosdepth
+        label: Skip Mosdepth QC
+        help: Skip QC with mosdepth
+        type: boolean
+        value: "false"
+      
+      - name: tech
+        label: Sequencing Technology
+        type: stage
+        stage: Alignment with Minimap2
+        stage_parameter_expression: '${tech}'
+
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Merge Minimap2 BAMs
+        stage_parameter_expression: '${output_folder}'
+
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: stage
+        stage: Alignment with Minimap2
+        stage_parameter_expression: '${ref_fasta}'
+
+      - name: model_base_path
+        label: Sentieon Models Base Path
+        type: stage
+        stage: Alignment with Minimap2
+        stage_parameter_expression: '${model_base_path}'
+
+  - name: Generate VSBatch File for VSPipeline
+    description: Generate a VSBatch file for the VSPipeline
+    task_path: tasks/generate_vsbatch.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Variant Calling with Sentieon CLI
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Variant Calling with Sentieon CLI
+        stage_parameter_expression: "${output_folder}"
+
+      - name: vsproject_template
+        label: VarSeq Project Template
+        type: file
+        supports_location_mode: 'read_only'
+        help: "The template to use for the VarSeq project."
+        path: AppData/VarSeq/User Data/ProjectTemplates/
+
+      - name: overwrite_project
+        label: Overwrite Existing VarSeq Projects
+        type: boolean
+        value: "true"
+        help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+      - name: cohort
+        label: Cohort Mode
+        type: boolean
+        value: "false"
+        help: "If enabled, put all samples into a single cohort group instead of finding relationships between them."
+
+  - name: Create VarSeq Project with VSPipeline
+    description: Create a VarSeq project with the VSPipeline based on the VSBatch file
+    task_path: tasks/vspipeline.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Generate VSBatch File for VSPipeline
+
+    glob_parameter:
+      label: Input Folder
+      path:
+        type: stage
+        stage: Generate VSBatch File for VSPipeline
+        parameter: input_folder
+      glob_ex: '**/*.vsbatch'
+      output_parameters:
+        - task_parameter_name: vsbatch_file
+          expression: '${0}'

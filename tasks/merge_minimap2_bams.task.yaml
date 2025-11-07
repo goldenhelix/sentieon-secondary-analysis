@@ -1,0 +1,190 @@
+name: Merge Minimap2 BAMs
+description: Merge multiple Minimap2 BAM files from a given sample into one and update the sample catalog
+auto_generate_session_for_account: "{workspaceBot}"
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    help: The name of the sample to merge.
+
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+    help: The folder containing the Minimap2 BAM files to merge.
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: Folder where the merged BAM file will be written.
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 16
+
+steps:
+  - name: merge_bams
+    description: Merge the Minimap2 BAM files into one
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # Parameter validation
+        pattern=" | "
+        if [[ "$sample_name" =~ "$pattern" ]]; then
+          echo "Sample name should not contain whitespace"
+          exit 1
+        fi
+
+        # Create output directory if it doesn't exist
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+
+        # Use scratch directory for temporary files
+        workdir="/scratch"
+        mkdir -p "$workdir" || { echo "Failed to create work directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
+
+        # Set up logging
+        logfile=${sample_name}_merge_minimap2_run.log
+        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+
+        # Find input BAM files matching the pattern (sample_name_*_minimap2.bam)
+        mapfile -t INPUT_BAMS < <(find "$input_folder" -name "${sample_name}.*.minimap2.bam" -type f)
+        
+        # Check if no BAM files found
+        if [ ${#INPUT_BAMS[@]} -eq 0 ]; then
+          echo "Error: No BAM files matching pattern ${sample_name}.*.minimap2.bam found in $input_folder"
+          exit 1
+        fi
+
+        # Check if there is only one BAM file found
+        if [ ${#INPUT_BAMS[@]} -eq 1 ]; then
+          echo "Only one BAM file found, copying to output folder"
+          output_bam="${output_folder}/${sample_name}.minimap2.bam"
+          cp "${INPUT_BAMS[0]}" "$output_bam" || { echo "Failed to copy BAM file"; exit 1; }
+          if [ -f "${INPUT_BAMS[0]}.bai" ]; then
+            cp "${INPUT_BAMS[0]}.bai" "${output_bam}.bai" || { echo "Failed to copy BAM index"; exit 1; }
+          else
+            echo "Indexing BAM file..."
+            samtools index "$output_bam" || { echo "Failed to index BAM file"; exit 1; }
+          fi
+          echo "Single BAM file copied successfully"
+          exit 0
+        fi
+
+        echo "================================================"
+        echo "🚀 STARTING MINIMAP2 BAM MERGING"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        for bam in "${INPUT_BAMS[@]}"; do
+          echo "  - $(basename "$bam") ($(format_file_size "$bam"))"
+        done
+        echo "📤 Output Configuration:"
+        echo "  - Output File: ${sample_name}.minimap2.bam"
+        echo "⚙️  Configuration:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Number of BAM files to merge: ${#INPUT_BAMS[@]}"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Memory: ${AGENT_MEMORY_GB}GB"
+        echo "================================================"
+        
+        # Record start time
+        MERGE_START_TIME=$(date +%s)
+
+        # Copy BAM files to work directory
+        echo "Copying BAM files to work directory..."
+        start_time=$SECONDS
+        for bam in "${INPUT_BAMS[@]}"; do
+          cp "$bam" "$workdir/" || { echo "Failed to copy $bam"; exit 1; }
+          if [ -f "${bam}.bai" ]; then
+            cp "${bam}.bai" "$workdir/" || { echo "Failed to copy ${bam}.bai"; exit 1; }
+          fi
+        done
+        echo "BAM files copied to work directory in $((SECONDS - start_time)) seconds"
+
+        # Find local BAM files
+        mapfile -t LOCAL_BAMS < <(find "$workdir" -name "${sample_name}.*.minimap2.bam" -type f)
+
+        # Merge BAM files
+        echo "Merging BAM files..."
+        output_bam_local="${workdir}/${sample_name}.minimap2.bam"
+        samtools merge --verbosity 2 --threads "$AGENT_CPU_CORES" -c -p -o "$output_bam_local" "${LOCAL_BAMS[@]}" || \
+          { echo "Failed to merge BAM files"; exit 1; }
+
+        # Index the merged BAM
+        echo "Indexing merged BAM..."
+        samtools index "$output_bam_local" || { echo "Failed to index merged BAM"; exit 1; }
+
+        # Copy merged BAM and index to output folder
+        echo "Copying merged BAM to output folder..."
+        cp "$output_bam_local" "${output_folder}/${sample_name}.minimap2.bam" || \
+          { echo "Failed to copy merged BAM"; exit 1; }
+        cp "${output_bam_local}.bai" "${output_folder}/${sample_name}.minimap2.bam.bai" || \
+          { echo "Failed to copy BAM index"; exit 1; }
+
+        # Post-execution logging for Merge
+        MERGE_END_TIME=$(date +%s)
+        MERGE_DURATION=$((MERGE_END_TIME - MERGE_START_TIME))
+        MERGE_DURATION_HOUR=$((MERGE_DURATION / 3600))
+        MERGE_DURATION_MIN=$(((MERGE_DURATION % 3600) / 60))
+        MERGE_DURATION_SEC=$((MERGE_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ MINIMAP2 BAM MERGING COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${MERGE_DURATION_HOUR}h ${MERGE_DURATION_MIN}m ${MERGE_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        if [ -f "${output_folder}/${sample_name}.minimap2.bam" ]; then
+          echo "  - $(basename "${output_folder}/${sample_name}.minimap2.bam") ($(format_file_size "${output_folder}/${sample_name}.minimap2.bam"))"
+        fi
+        if [ -f "${output_folder}/${sample_name}.minimap2.bam.bai" ]; then
+          echo "  - $(basename "${output_folder}/${sample_name}.minimap2.bam.bai") ($(format_file_size "${output_folder}/${sample_name}.minimap2.bam.bai"))"
+        fi
+        echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "================================================"
+        
+        # Copy log file to output folder
+        cp -f "$logfile" "$output_folder"/ || { echo "Failed to copy log file"; exit 1; }
+        
+        # Delete unmerged BAM files from input directory after successful merge
+        echo "Deleting unmerged BAM files from input directory..."
+        for bam in "${INPUT_BAMS[@]}"; do
+          if [ -f "$bam" ]; then
+            echo "  - Deleting $(basename "$bam")"
+            rm -f "$bam" || { echo "Warning: Failed to delete $bam"; }
+          fi
+          if [ -f "${bam}.bai" ]; then
+            echo "  - Deleting $(basename "${bam}.bai")"
+            rm -f "${bam}.bai" || { echo "Warning: Failed to delete ${bam}.bai"; }
+          fi
+        done
+        echo "Unmerged BAM files deleted successfully"
+        
+        cd "$TASK_DIR"
+
+  - name: update_sample_catalog
+    description: Add Merged Minimap2 Output to Sample Catalog
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+
+        cd "${output_folder}"
+        output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}.minimap2.bam"
+        gautil client catalog-upsert SampleCatalog \
+          Sample="$sample_name" \
+          BAMPath="$output_bam_path" || \
+          { echo "Failed to update sample catalog"; exit 1; }
+        echo "Updated sample $sample_name with BAM: ${sample_name}.minimap2.bam"
+
