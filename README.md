@@ -4,7 +4,7 @@ This repository contains workflows for genomic analysis using Sentieon's genomic
 
 ## Prerequisites
 
-Run the [**Download Genomic Reference Resources**](download.task.yaml) task to download and prepare the required local reference sequence and model files. These resources must be available on your system before running any of the workflows.
+Run the [**Download Genomic Reference Resources**](workflows/task/Sentieon%20Secondary%20Analysis%2Fdownload) task to download and prepare the required local reference sequence and model files. These resources must be available on your system before running any of the workflows.
 
 For long-read workflows, ensure the **Sentieon Long Read Models** option is enabled when running the Download Genomic Reference Resources task to download the required model bundles for HiFi and ONT sequencing technologies.
 
@@ -270,6 +270,6 @@ Most workflows include advanced options for:
 
 ## Additional Resources
 
-- [Sentieon Manual](https://support.sentieon.com/manual/)
-- [VarSeq Documentation](https://www.goldenhelix.com/products/VarSeq/documentation/)
+- [Sentieon Manual](https://support.sentieon.com/docs/)
+- [VarSeq Documentation](https://www.goldenhelix.com/docs/VarSeq/latest/vs_index.html)
 - Workspace Settings: Configure resource paths and default references

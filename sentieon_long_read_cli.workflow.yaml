@@ -11,7 +11,6 @@ stages:
       - name: input_tsv
         label: Batch TSV File
         type: file
-        pattern: '*.tsv'
         help: "The batch file containing a list of FASTQ or uBAM (unaligned BAM), including failed target uBAMs, files to align and their associated samples."
 
       - name: folder_name
