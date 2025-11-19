@@ -10,7 +10,8 @@ parameters:
   - name: vsbatch_file
     label: VSBatch File
     type: file
-    pattern: "*.vsbatch"
+    pattern_match:
+      - '*.vsbatch'
     supports_location_mode: 'read_only'
     help: "The VSBatch file to use for the VarSeq project."
 

@@ -48,3 +48,4 @@ steps:
 
         output_folder_rel="${output_folder#$WORKSPACE_DIR/}"
         echo "output_folder=${output_folder_rel}" > result.env
+        sleep 0.5

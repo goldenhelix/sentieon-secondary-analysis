@@ -3,8 +3,8 @@ description: Generate VSBatch files for each set of related samplesbased on the 
 auto_generate_session_for_account: "{workspaceBot}"
 
 agent_requirements:
-  cpu_cores: 4
-  memory_gb: 8
+  cpu_cores: 0
+  memory_gb: 0
 
 parameters:
   - name: input_folder
@@ -51,6 +51,12 @@ steps:
         #############################
 
         cd /scratch
+
+        # Check that the selected project matches the workspace genome assembly
+        if ! grep -q "\"genome\": \"$GH_WORKSPACE_ASSEMBLY\"" "$vsproject_template"; then
+          echo "Error: Project template does not match the current workspace assembly: $GH_WORKSPACE_ASSEMBLY"
+          exit 1
+        fi
 
         #############################
         # Find related samples

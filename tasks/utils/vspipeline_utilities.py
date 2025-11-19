@@ -305,7 +305,7 @@ def _generate_vsbatch_content(template_file: str,
     if multiverse_files:
         # Quote each file and join with commas (no spaces)
         quoted_files = ','.join([f'"{f}"' for f in multiverse_files])
-        vsbatch_lines.append(f'import files={quoted_files}')
+        vsbatch_lines.append(f'import files={quoted_files} sample_fields_catalog=SampleCatalog')
         vsbatch_lines.append(f'task_wait')
     
     # Add CNV import if algorithm exists and files are available
