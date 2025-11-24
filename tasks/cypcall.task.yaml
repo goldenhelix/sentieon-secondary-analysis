@@ -142,7 +142,7 @@ steps:
         echo "================================================"
 
         sample_count=0
-        while IFS=$'\t' read -r sample pgx_genotypes alt_cyp2d6_genotypes alleles_tested; do
+        while IFS='|' read -r sample pgx_genotypes alt_cyp2d6_genotypes alleles_tested; do
           if [[ -z "$sample" ]]; then
             continue
           fi
@@ -154,7 +154,7 @@ steps:
               AlternativeCYP2D6Genotypes="$alt_cyp2d6_genotypes" \
               AllelesTested="$alleles_tested"
           sample_count=$((sample_count + 1))
-        done < <(tail -n +2 "${output_folder}/$cypcall_tsv")
+        done < <(tail -n +2 "${output_folder}/$cypcall_tsv" | tr '\t' '|')
 
         echo "================================================"
         echo "✅ SAMPLE CATALOG UPDATE COMPLETED"
