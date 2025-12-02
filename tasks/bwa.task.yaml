@@ -267,9 +267,9 @@ steps:
         echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
         echo "  - Input Folder: $input_folder"
         if [[ "$use_prefix" == "true" ]]; then
-          echo "  - Input Filter: ${sample_name}*.fastq.gz"
+          echo "  - Input Filter: ${sample_name}*.{fastq.gz,fq.gz}"
         else
-          echo "  - Input Filter: *.fastq.gz"
+          echo "  - Input Filter: *.{fastq.gz,fq.gz}"
         fi
         echo "📤 Output Configuration:"
         echo "  - Output Folder: $output_folder"
@@ -316,6 +316,10 @@ steps:
               fi
               reads_base="${fastq_1%%_1.*}"
             fi
+
+            echo "Running BWA-MEM alignment for the following detected FASTQ files:"
+            echo "  - $fastq_1"
+            echo "  - $fastq_2"
             
             sample_lane=$(basename "$reads_base")
             if [[ -f "$fastq_1" && -f "$fastq_2" ]]; then
@@ -361,9 +365,13 @@ steps:
         else
           while IFS= read -r file; do
             reads_base="${file%.fastq.gz}"
+            if [[ "$reads_base" == "$file" ]]; then
+              reads_base="${file%.fq.gz}"
+            fi
             sample_lane=$(basename "$reads_base")
             
             # Validate FASTQ file before processing
+            echo "Validating FASTQ file: $file"
             if ! zcat "$file" | awk 'NR%4==2{seq_len=length($0)} NR%4==0{qual_len=length($0); if(seq_len!=qual_len){print "ERROR: SEQ and QUAL length mismatch at line " NR-3 " (sequence length: " seq_len ", quality length: " qual_len ")"; exit 1}} END{if(NR%4!=0){print "ERROR: Invalid FASTQ format - file does not contain complete read records"; exit 1}}'; then
               echo "ERROR: FASTQ file validation failed for $file"
               echo "This error typically indicates corrupted or malformed FASTQ data"
@@ -596,6 +604,8 @@ steps:
           # Record start time
           DEDUP_START_TIME=$(date +%s)
 
+          # For cloud fuse systems, mkdir should be close to usage
+          mkdir -p "${output_folder}"
           if [ $output_metrics == true ]; then
             echo "Running deduplication with metrics..."
             if ! sentieon driver -r "$ref_fasta_local" -t $num_threads --temp_dir "$workdir" $bam_input --algo Dedup \
@@ -708,6 +718,9 @@ steps:
 
           # Count how many -i arguments we have in bam_input
           bam_count=$(echo "$bam_input" | grep -o '\-i' | wc -l)
+
+          # For cloud fuse systems, mkdir should be close to usage
+          mkdir -p "${output_folder}"
 
           if [ "$bam_count" -eq 1 ] && [ "$cram" == false ]; then
             # If only one input BAM, just copy it to the output

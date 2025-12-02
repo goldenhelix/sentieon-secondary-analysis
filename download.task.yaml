@@ -3,7 +3,7 @@ description: Download reference genomes and model files for genomic analysis
 
 agent_requirements:
   cpu_cores: 0
-  memory_gb: 1
+  memory_gb: 0
 
 parameters: 
   - name: download_hg38_noalt
