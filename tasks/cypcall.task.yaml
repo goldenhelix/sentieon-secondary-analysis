@@ -32,7 +32,7 @@ steps:
     description: Run CypCall CYP2D6 Genotyper
     type: cmd
     docker:
-      image: registry.goldenhelix.com/public/cypcall:2025-10-01
+      image: registry.goldenhelix.com/public/cypcall:2025-12-03
     args:
       - |- # shell
         set -eu pipefail
