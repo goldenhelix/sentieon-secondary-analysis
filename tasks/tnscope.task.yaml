@@ -379,7 +379,9 @@ steps:
             --input_dir "$output_folder" \
             --sample "$tumor_sample_name" \
             --file "$tumor_vcf" \
-            --file_type multiverse || \
+            --file_type multiverse \
+            --task_name tnscope \
+            --scratch_dir "$workdir" || \
             { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
         else
           echo "Warning: python3 not available in Docker container, skipping vspipeline_inputs.json update"

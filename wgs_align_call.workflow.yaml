@@ -2,12 +2,8 @@ name: Comprehensive Whole-Genome Analysis with PGx
 description: Perform alignment, genotyping, and reporting with BWA-MEM, DNAscope, CypCall, and VSPGx. Expected SampleCatalog fields include PGxGenotypes, AlternativeCYP2D6Genotypes, and AllelesTested.
 
 
-selected_requirements_configuration: Exomes
+selected_requirements_configuration: Genomes
 requirements_configurations:
-  - name: Panels
-    description: Small FASTQ inputs for gene panels
-  - name: Exomes
-    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
   - name: Genomes
     description: Large FASTQ inputs for high coverage whole genomes
     
@@ -61,12 +57,18 @@ stages:
         stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
+      - name: cram
+        label: Output CRAM
+        type: boolean
+        value: "true"
+        help: "If enabled, the output will be in CRAM format instead of BAM format."
+
       - name: ml_model
-        value: "None"
+        value: "Illumina WGS 2.2"
         label: Machine Learning Model
         type: enum
-        choices: [None, Element Biosciences WES 2.1, Element Biosciences WGS 2.1, Illumina WES 2.1, Illumina WGS 2.2,
-                  MGI WES 2.1, MGI WGS 2.1, Salus WES 1.0, Salus WGS 1.0, 
+        choices: [Element Biosciences WGS 2.1, Illumina WGS 2.2,
+                  MGI WGS 2.1, Salus WGS 1.0, 
                   Ultima Genomics WGS 1.1]
         optional: false
         help: "The Sentieon machine learning model to use for improvements to speed and accuracy for alignment and variant-calling. Leave as None if your data does not match any of the available options. See Sentieon's GitHub page for more information."
@@ -105,7 +107,7 @@ stages:
         stage: Prepare Directories
         # This is a parameter expression because output_folder is written to result.evn by prepare_directories
         parameter_expression: "${output_folder}"
-      glob_ex: '**/*_*.bam'
+      glob_ex: '**/*_*.*am'
       output_parameters:
         - task_parameter_name: input_file
           expression: '${0}'
@@ -154,19 +156,64 @@ stages:
         stage_parameter_expression: "true"
         help: "Enable must-call VCF for PGx diplotyping."
 
-  - name: CYP2D6 Genotyping with CypCall
-    description: CYP2D6 genotyping from an alignment file with CypCall
-    task_path: tasks/cypcall.task.yaml
+      - name: call_svs
+        label: Call SV
+        type: boolean
+        value: "true"
+        help: Set to true to call SV using Sentieon's SV calling algorithm. Default is true for WGS data.
+
+  - name: CNV Calling with Sentieon CNVscope
+    description: CNV calling from an alignment file with Sentieon's CNVscope algorithm
+    task_path: tasks/cnvscope.task.yaml
     depends_on:
       - Alignment with BWA-MEM
-    
+
     glob_parameter:
       label: Alignment Folder
       path:
         type: stage
         stage: Prepare Directories
         parameter_expression: "${output_folder}"
-      glob_ex: '**/*_*.bam'
+      glob_ex: '**/*_*.*am'
+      output_parameters:
+        - task_parameter_name: input_file
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+        
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: ml_model  
+        label: Machine Learning Model
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ml_model}"
+        optional: false
+        
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ref_fasta}"
+
+  - name: Short Tandem Repeat Analysis with ExpansionHunter
+    description: Short tandem repeat analysis from an alignment file with ExpansionHunter
+    task_path: tasks/expansionhunter.task.yaml
+    depends_on:
+      - Alignment with BWA-MEM
+
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        parameter_expression: "${output_folder}"
+      glob_ex: '**/*_*.*am'
       output_parameters:
         - task_parameter_name: input_file
           expression: '${0}'
@@ -180,35 +227,88 @@ stages:
         stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
-  - name: VSPGx Create Project and Report
-    description: Create a project with called variants and generate report
-    task_path: tasks/vspgx.task.yaml
+      - name: ref_fasta
+        label: Reference File (FASTA)
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${ref_fasta}"
+
+  - name: CYP2D6 Genotyping with CypCall
+    description: CYP2D6 genotyping from an alignment file with CypCall
+    task_path: tasks/cypcall.task.yaml
     depends_on:
-      - Variant Calling with DNAscope
-      - CYP2D6 Genotyping with CypCall
+      - Alignment with BWA-MEM
+    
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Prepare Directories
+        parameter_expression: "${output_folder}"
+      glob_ex: '**/*_*.*am'
+      output_parameters:
+        - task_parameter_name: input_file
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
 
     task_parameters:
-      - name: base_path
-        label: Input Folder
+      - name: output_folder
+        label: Output Folder
         type: stage
         stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
-      - name: project_name
-        label: Project Name
-        type: string
-        optional: true
-        help: "The name of the VarSeq project to create. If not provided, the project name will be derived from the sample name derived from the glob expression."
+  - name: Generate VSBatch File for VSPipeline
+    description: Generate a VSBatch file for the VSPipeline
+    task_path: tasks/generate_vsbatch.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Variant Calling with DNAscope
+      - CNV Calling with Sentieon CNVscope
+      - Short Tandem Repeat Analysis with ExpansionHunter
 
-      - name: project_template
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Variant Calling with DNAscope
+        stage_parameter_expression: "${output_folder}"
+
+      - name: vsproject_template
         label: VarSeq Project Template
         type: file
         supports_location_mode: 'read_only'
         help: "The template to use for the VarSeq project."
-        path: /AppData/VarSeq/User Data/ProjectTemplates/
+        path: AppData/VarSeq/User Data/ProjectTemplates/
 
       - name: overwrite_project
         label: Overwrite Existing VarSeq Projects
         type: boolean
         value: "true"
         help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+      - name: cohort
+        label: Cohort Mode
+        type: boolean
+        value: "false"
+        help: "If enabled, put all samples into a single cohort group instead of finding relationships between them."
+
+  - name: Create VarSeq Project with VSPipeline
+    description: Create a VarSeq project with the VSPipeline based on the VSBatch file
+    task_path: tasks/vspipeline.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Generate VSBatch File for VSPipeline
+      - CYP2D6 Genotyping with CypCall
+
+    glob_parameter:
+      label: Input Folder
+      path:
+        type: stage
+        stage: Generate VSBatch File for VSPipeline
+        parameter: input_folder
+      glob_ex: '**/*.vsbatch'
+      output_parameters:
+        - task_parameter_name: vsbatch_file
+          expression: '${0}'

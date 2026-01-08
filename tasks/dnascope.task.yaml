@@ -74,6 +74,12 @@ parameters:
     value: "false"
     help: Set to true to output GVCF format instead of VCF. Mutually exclusive with must-call VCF.
 
+  - name: call_svs
+    label: Call SV
+    type: boolean
+    value: "false"
+    help: Set to true to call SV using Sentieon's SV calling algorithm.
+
   - name: use_must_call_vcf
     label: Use Must-Call VCF
     type: boolean
@@ -385,9 +391,16 @@ steps:
             bgzip "${sample_name}_dnascope_merged.vcf" || \
               { echo "bgzip failed"; exit 1; }
             
-            # Move final output to output folder
-            mv "${sample_name}_dnascope_merged.vcf.gz" "${output_folder}/${sample_name}_dnascope.vcf.gz" || \
-              { echo "Failed to move merged VCF to output folder"; exit 1; }
+            # Index the merged VCF in /scratch
+            echo "Indexing merged VCF file..."
+            tabix -f -p vcf "${sample_name}_dnascope_merged.vcf.gz" || \
+              { echo "Warning: Failed to index merged VCF file"; if [ ! -f "${sample_name}_dnascope_merged.vcf.gz.tbi" ]; then echo "Index file does not exist, exiting..."; exit 1; else echo "Index file exists, continuing..."; fi; }
+            
+            # Copy final output and index to output folder
+            cp "${sample_name}_dnascope_merged.vcf.gz" "${output_folder}/${sample_name}_dnascope.vcf.gz" || \
+              { echo "Failed to copy merged VCF to output folder"; exit 1; }
+            cp "${sample_name}_dnascope_merged.vcf.gz.tbi" "${output_folder}/${sample_name}_dnascope.vcf.gz.tbi" || \
+              { echo "Failed to copy merged VCF index to output folder"; exit 1; }
             
           else
             # Standard DNAscope calling without must-call
@@ -399,13 +412,45 @@ steps:
 
               sentieon driver -r "$local_ref_fasta" -t $num_threads --temp_dir "$workdir" \
                 --algo DNAModelApply --model "$model_path/dnascope.model" \
-                -v "${sample_name}_dnascope_tmp.$output_suffix" "${output_folder}/${sample_name}_dnascope.$output_suffix" || \
+                -v "${sample_name}_dnascope_tmp.$output_suffix" "${sample_name}_dnascope.$output_suffix" || \
                 { echo "DNAModelApply failed"; exit 1; }
             else
               sentieon driver -r "$local_ref_fasta" -t $num_threads -i "$input_basename" --temp_dir "$workdir" \
                 --algo DNAscope $extra_params \
-                "${output_folder}/${sample_name}_dnascope.$output_suffix" || \
+                "${sample_name}_dnascope.$output_suffix" || \
                 { echo "DNAscope variant calling failed"; exit 1; }
+            fi
+            
+            # Index the VCF file in /scratch
+            echo "Indexing VCF file..."
+            tabix -f -p vcf "${sample_name}_dnascope.$output_suffix" || \
+              { echo "Warning: Failed to index VCF file"; if [ ! -f "${sample_name}_dnascope.$output_suffix.tbi" ]; then echo "Index file does not exist, exiting..."; exit 1; else echo "Index file exists, continuing..."; fi; }
+            
+            # Copy VCF and index to output folder
+            cp "${sample_name}_dnascope.$output_suffix" "${output_folder}/${sample_name}_dnascope.$output_suffix" || \
+              { echo "Failed to copy VCF to output folder"; exit 1; }
+            cp "${sample_name}_dnascope.$output_suffix.tbi" "${output_folder}/${sample_name}_dnascope.$output_suffix.tbi" || \
+              { echo "Failed to copy VCF index to output folder"; exit 1; }
+          fi
+          
+          # Call SV if enabled
+          if [[ "$call_svs" = true ]]; then
+            echo "Calling SV using Sentieon's SV calling algorithm..."
+            sentieon driver -t $num_threads -r "$local_ref_fasta" -i "$input_basename" \
+              --algo DNAscope --var_type bnd \
+              ${sample_name}_sv_tmp.vcf.gz || \
+              { echo "DNAscope SV calling failed"; exit 1; }
+            sentieon driver -t $num_threads -r "$local_ref_fasta" --algo SVSolver  \
+              -v ${sample_name}_sv_tmp.vcf.gz ${sample_name}_sv.vcf.gz || \
+              { echo "SVSolver failed"; exit 1; }
+            
+            # Copy SV VCF to output folder
+            mv "${sample_name}_sv.vcf.gz" "${output_folder}/${sample_name}_sv.vcf.gz" || \
+              { echo "Failed to move SV VCF to output folder"; exit 1; }
+            # Copy index if it exists
+            if [ -f "${sample_name}_sv.vcf.gz.tbi" ]; then
+              mv "${sample_name}_sv.vcf.gz.tbi" "${output_folder}/${sample_name}_sv.vcf.gz.tbi" || \
+                { echo "Failed to move SV VCF index to output folder"; exit 1; }
             fi
           fi
 
@@ -428,6 +473,10 @@ steps:
           echo "================================================"
           echo "⏱️  Execution Time: ${DNASCOPE_DURATION_HOUR}h ${DNASCOPE_DURATION_MIN}m ${DNASCOPE_DURATION_SEC}s"
           echo "📁 Output File: $(basename "$output_file") ($(format_file_size "$output_file"))"
+          if [[ "$call_svs" = true ]]; then
+            sv_output_file="${output_folder}/${sample_name}_sv.vcf.gz"
+            echo "📁 SV Output File: $(basename "$sv_output_file") ($(format_file_size "$sv_output_file"))"
+          fi
           echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
           echo "================================================"
           
@@ -448,8 +497,23 @@ steps:
               --input_dir "$output_folder" \
               --sample "$sample_name" \
               --file "$output_file" \
-              --file_type multiverse || \
+              --file_type multiverse \
+              --task_name dnascope \
+              --scratch_dir "$workdir" || \
               { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
+            
+            # Update vspipeline_inputs.json with SV VCF file if SV calling was enabled
+            if [[ "$call_svs" = true ]]; then
+              sv_output_file="${output_folder}/${sample_name}_sv.vcf.gz"
+              python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+                --input_dir "$output_folder" \
+                --sample "$sample_name" \
+                --file "$sv_output_file" \
+                --file_type bnd \
+                --task_name dnascope \
+                --scratch_dir "$workdir" || \
+                { echo "Warning: Failed to update vspipeline_inputs.json with SV VCF, continuing..."; }
+            fi
           else
             echo "Warning: python3 not available in Docker container, skipping vspipeline_inputs.json update"
             echo "The JSON file can be updated manually or via a separate task"

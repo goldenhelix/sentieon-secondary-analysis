@@ -217,8 +217,10 @@ steps:
         # Advanced Options
         if [[ $cram == true ]]; then
           align_extension=".cram"
+          index_extension=".crai"
         else
           align_extension=".bam"
+          index_extension=".bai"
         fi
 
         # Auto-detect paired-end reads based on file naming
@@ -234,8 +236,8 @@ steps:
           else
             continue
           fi
-          # Check if the base name contains _R1/_R2 (anywhere) or ends with _1/_2
-          if [[ "$base_name" =~ _R1 ]] || [[ "$base_name" =~ _R2 ]] || [[ "$base_name" =~ (_1|_2)$ ]]; then
+          # Check if the base name contains _R1/_R2 (anywhere), ends with _1/_2, or ends with _f/_r
+          if [[ "$base_name" =~ _R1 ]] || [[ "$base_name" =~ _R2 ]] || [[ "$base_name" =~ (_1|_2)$ ]] || [[ "$base_name" =~ (_f|_r)$ ]]; then
             paired_end=true
             break
           fi
@@ -295,7 +297,7 @@ steps:
         bam_input=""
         if [[ $paired_end == true ]]; then
           while IFS= read -r file; do
-            # Detect which pattern is used (_R1/_R2 or _1/_2)
+            # Detect which pattern is used (_R1/_R2, _1/_2, or _f/_r)
             fastq_1=""
             fastq_2=""
             reads_base=""
@@ -315,47 +317,77 @@ steps:
                 fastq_2="${file%_1.fq.gz}_2.fq.gz"
               fi
               reads_base="${fastq_1%%_1.*}"
+            elif [[ "$file" =~ _f\.fastq\.gz$ ]] || [[ "$file" =~ _f\.fq\.gz$ ]]; then
+              # Handle _f/_r pattern - only at the end of the filename (before extension)
+              fastq_1="$file"
+              # Replace _f with _r at the end before extensions
+              if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                fastq_2="${file%_f.fastq.gz}_r.fastq.gz"
+              elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                fastq_2="${file%_f.fq.gz}_r.fq.gz"
+              fi
+              reads_base="${fastq_1%%_f.*}"
             fi
 
-            echo "Running BWA-MEM alignment for the following detected FASTQ files:"
-            echo "  - $fastq_1"
-            echo "  - $fastq_2"
-            
-            sample_lane=$(basename "$reads_base")
-            if [[ -f "$fastq_1" && -f "$fastq_2" ]]; then
-              bam_input="$bam_input -i ${sample_lane}.bam"
-              if [[ -z "$platform" ]]; then
-                read_groups="@RG\tID:${sample_lane}\tSM:$sample_name"
-              else
-                read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
+            # Only process if we found a valid pattern match
+            if [[ -n "$fastq_1" ]]; then
+              sample_lane=$(basename "$reads_base")
+              if [[ -f "$fastq_1" && -f "$fastq_2" ]]; then
+                echo "Running BWA-MEM alignment for the following detected FASTQ files:"
+                echo "  - $fastq_1"
+                echo "  - $fastq_2"
+                
+                bam_input="$bam_input -i ${sample_lane}${align_extension}"
+                if [[ -z "$platform" ]]; then
+                  read_groups="@RG\tID:${sample_lane}\tSM:$sample_name"
+                else
+                  read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
+                fi
+                start_time=$SECONDS
+                if [ $umi == false ]; then 
+                  { (sentieon bwa mem \
+                      -R "$read_groups" \
+                      ${model_path:+-x "${model_path}"/bwa.model} \
+                      -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                      "$fastq_1" "$fastq_2" \
+                      || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                    2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
+                      3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                      { echo "BWA-MEM failed"; exit 1; }
+                else
+                  { (sentieon umi extract $umi_read_structure "$fastq_1" "$fastq_2" || \
+                      { echo -n "UMI extract error"; false; }) | \
+                    (sentieon bwa mem \
+                      -p -C \
+                      -R "$read_groups" \
+                      ${model_path:+-x "${model_path}"/bwa.model} \
+                      -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
+                      - \
+                      || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
+                    2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
+                      3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
+                      { echo "BWA-MEM failed"; exit 1; }
+                fi
+                duration=$((SECONDS - start_time))
+                file_size=$(stat -c%s "${sample_lane}${align_extension}")
+                
+                # Ensure correct index file exists and remove incorrect index if present
+                if [[ "$align_extension" == ".cram" ]]; then
+                  # Remove any incorrectly created .bai file
+                  rm -f "${sample_lane}.bai" 2>/dev/null || true
+                  # Create .crai index if it doesn't exist
+                  if [ ! -f "${sample_lane}.crai" ]; then
+                    samtools index "${sample_lane}${align_extension}" || { echo "WARNING: Failed to create CRAM index"; }
+                  fi
+                else
+                  # Remove any incorrectly created .crai file
+                  rm -f "${sample_lane}.crai" 2>/dev/null || true
+                  # Create .bai index if it doesn't exist
+                  if [ ! -f "${sample_lane}.bai" ]; then
+                    samtools index "${sample_lane}${align_extension}" || { echo "WARNING: Failed to create BAM index"; }
+                  fi
+                fi
               fi
-              start_time=$SECONDS
-              if [ $umi == false ]; then 
-                { (sentieon bwa mem \
-                    -R "$read_groups" \
-                    ${model_path:+-x "${model_path}"/bwa.model} \
-                    -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
-                    "$fastq_1" "$fastq_2" \
-                    || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
-                  2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
-                    3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                    { echo "BWA-MEM failed"; exit 1; }
-              else
-                { (sentieon umi extract $umi_read_structure "$fastq_1" "$fastq_2" || \
-                    { echo -n "UMI extract error"; false; }) | \
-                  (sentieon bwa mem \
-                    -p -C \
-                    -R "$read_groups" \
-                    ${model_path:+-x "${model_path}"/bwa.model} \
-                    -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
-                    - \
-                    || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
-                  2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
-                    3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                    { echo "BWA-MEM failed"; exit 1; }
-              fi
-              duration=$((SECONDS - start_time))
-              file_size=$(stat -c%s "${sample_lane}.bam")
             fi
           done < <(if [[ "$use_prefix" == "true" ]]; then
             find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
@@ -378,7 +410,7 @@ steps:
               exit 1
             fi
             
-            bam_input="$bam_input -i ${sample_lane}.bam"
+            bam_input="$bam_input -i ${sample_lane}${align_extension}"
             if [[ -z "$platform" ]]; then
               read_groups="@RG\tID:${sample_lane}\tSM:$sample_name"
             else
@@ -392,7 +424,7 @@ steps:
                 -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
                 "$file" \
                 || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
-                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                 3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
                 { echo "BWA-MEM failed"; exit 1; }
             else
@@ -404,12 +436,12 @@ steps:
                   -t $num_threads -K $input_bases_per_batch "$ref_fasta" \
                   "$file" \
                   || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
-                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}.bam" -t $num_threads --sam2bam -i - ;} \
+                2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                 3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
                 { echo "BWA-MEM failed"; exit 1; }
             fi
             duration=$((SECONDS - start_time))
-            file_size=$(stat -c%s "${sample_lane}.bam")
+            file_size=$(stat -c%s "${sample_lane}${align_extension}")
           done < <(if [[ "$use_prefix" == "true" ]]; then
             find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
           else
@@ -620,6 +652,23 @@ steps:
               echo "  - Output: ${sample_name}_deduped${align_extension}"
               exit 1
             fi
+            # Ensure correct index file exists and remove incorrect index if present
+            if [[ "$align_extension" == ".cram" ]]; then
+              # Remove any incorrectly created .bai file
+              rm -f "${sample_name}_deduped.bai" 2>/dev/null || true
+              # Create .crai index if it doesn't exist
+              if [ ! -f "${sample_name}_deduped.crai" ]; then
+                samtools index "${sample_name}_deduped${align_extension}" || { echo "WARNING: Failed to create CRAM index"; }
+              fi
+            else
+              # Remove any incorrectly created .crai file
+              rm -f "${sample_name}_deduped.crai" 2>/dev/null || true
+              # Create .bai index if it doesn't exist
+              if [ ! -f "${sample_name}_deduped.bai" ]; then
+                samtools index "${sample_name}_deduped${align_extension}" || { echo "WARNING: Failed to create BAM index"; }
+              fi
+            fi
+            
             echo "Copying deduplicated file to output folder..."
             if ! cp "${sample_name}_deduped${align_extension}"* "${output_folder}/"; then
               echo "ERROR: Failed to copy deduplicated file to output folder"
@@ -650,6 +699,22 @@ steps:
               echo "  - Output: ${output_folder}/${sample_name}_deduped${align_extension}"
               exit 1
             fi
+            # Ensure correct index file exists and remove incorrect index if present
+            if [[ "$align_extension" == ".cram" ]]; then
+              # Remove any incorrectly created .bai file
+              rm -f "${output_folder}/${sample_name}_deduped.bai" 2>/dev/null || true
+              # Create .crai index if it doesn't exist
+              if [ ! -f "${output_folder}/${sample_name}_deduped.crai" ]; then
+                samtools index "${output_folder}/${sample_name}_deduped${align_extension}" || { echo "WARNING: Failed to create CRAM index"; }
+              fi
+            else
+              # Remove any incorrectly created .crai file
+              rm -f "${output_folder}/${sample_name}_deduped.crai" 2>/dev/null || true
+              # Create .bai index if it doesn't exist
+              if [ ! -f "${output_folder}/${sample_name}_deduped.bai" ]; then
+                samtools index "${output_folder}/${sample_name}_deduped${align_extension}" || { echo "WARNING: Failed to create BAM index"; }
+              fi
+            fi
           fi
 
           # Post-execution logging for Deduplication
@@ -671,11 +736,8 @@ steps:
           if [ -f "${sample_name}_deduped${align_extension}" ]; then
             DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}" 2>/dev/null || echo "0")))
           fi
-          if [ -f "${sample_name}_deduped${align_extension}.bai" ]; then
-            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}.bai" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "${sample_name}_deduped${align_extension}.crai" ]; then
-            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}.crai" 2>/dev/null || echo "0")))
+          if [ -f "${sample_name}_deduped${align_extension}${index_extension}" ]; then
+            DEDUP_TOTAL_SIZE=$((DEDUP_TOTAL_SIZE + $(stat -c%s "${sample_name}_deduped${align_extension}${index_extension}" 2>/dev/null || echo "0")))
           fi
           
           # Format total size
@@ -734,14 +796,8 @@ steps:
               echo "  - Output: ${output_folder}/${sample_name}_sorted${align_extension}"
               exit 1
             fi
-            if [[ "$align_extension" == ".bam" ]]; then
-              if [ -f "${input_bam}.bai" ]; then
-                cp "${input_bam}.bai" "${output_folder}/${sample_name}_sorted${align_extension}.bai" 2>/dev/null || echo "WARNING: Failed to copy BAM index"
-              fi
-            else
-              if [ -f "${input_bam}.crai" ]; then
-                cp "${input_bam}.crai" "${output_folder}/${sample_name}_sorted${align_extension}.crai" 2>/dev/null || echo "WARNING: Failed to copy CRAM index"
-              fi
+            if [ -f "${input_bam}${index_extension}" ]; then
+              cp "${input_bam}${index_extension}" "${output_folder}/${sample_name}_sorted${align_extension}${index_extension}" 2>/dev/null || echo "WARNING: Failed to copy index file"
             fi
           else
             # Multiple BAMs need to be merged or CRAM output is requested
@@ -758,6 +814,22 @@ steps:
               echo "  - BAM input: $bam_input"
               echo "  - Output: ${output_folder}/${sample_name}_sorted${align_extension}"
               exit 1
+            fi
+            # Ensure correct index file exists and remove incorrect index if present
+            if [[ "$align_extension" == ".cram" ]]; then
+              # Remove any incorrectly created .bai file
+              rm -f "${output_folder}/${sample_name}_sorted.bai" 2>/dev/null || true
+              # Create .crai index if it doesn't exist
+              if [ ! -f "${output_folder}/${sample_name}_sorted.crai" ]; then
+                samtools index "${output_folder}/${sample_name}_sorted${align_extension}" || { echo "WARNING: Failed to create CRAM index"; }
+              fi
+            else
+              # Remove any incorrectly created .crai file
+              rm -f "${output_folder}/${sample_name}_sorted.crai" 2>/dev/null || true
+              # Create .bai index if it doesn't exist
+              if [ ! -f "${output_folder}/${sample_name}_sorted.bai" ]; then
+                samtools index "${output_folder}/${sample_name}_sorted${align_extension}" || { echo "WARNING: Failed to create BAM index"; }
+              fi
             fi
           fi
 
@@ -780,11 +852,8 @@ steps:
           if [ -f "${output_folder}/${sample_name}_sorted${align_extension}" ]; then
             MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}" 2>/dev/null || echo "0")))
           fi
-          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}.bai" ]; then
-            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}.bai" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}.crai" ]; then
-            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}.crai" 2>/dev/null || echo "0")))
+          if [ -f "${output_folder}/${sample_name}_sorted${align_extension}${index_extension}" ]; then
+            MERGE_TOTAL_SIZE=$((MERGE_TOTAL_SIZE + $(stat -c%s "${output_folder}/${sample_name}_sorted${align_extension}${index_extension}" 2>/dev/null || echo "0")))
           fi
           
           # Format total size
@@ -833,15 +902,12 @@ steps:
   - name: update_sample_catalog
     description: Add BWA-MEM Output to Sample Catalog
     type: cmd
-    docker:
-      image: ${VSPIPELINE_DOCKER_IMAGE}
     args:
       - |- # shell 
         set -eu pipefail
 
         export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
 
-        cd "${output_folder}"
         if [[ $cram == true ]]; then
           align_extension=".cram"
         else
@@ -852,6 +918,7 @@ steps:
         else
           output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}_sorted${align_extension}"
         fi
+        cd "${WORKSPACE_DIR}"
         gautil client catalog-upsert SampleCatalog \
           Sample="$sample_name" \
           BAMPath="$output_bam_path" || \

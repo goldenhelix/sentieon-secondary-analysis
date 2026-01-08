@@ -1,0 +1,410 @@
+name: ExpansionHunter
+description: Repeat expansion detection with ExpansionHunter
+
+agent_requirements: 
+  cpu_cores: 16
+  memory_gb: 32
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: true
+    help: "The name of the sample to be used in the output file. If not provided, the sample name will be inferred from the input file."
+  
+  - name: input_file
+    label: Input Alignment File
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    help: "The input alignment file to be used for expansion hunter analysis. This workflow supports BAM and CRAM files."
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The output folder for the expansion hunter analysis. This folder will contain the expansion hunter output files."
+  
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    help: "The reference file to be used for expansion hunter analysis. This file should be in FASTA format."
+    optional: true
+
+  - name: variants_json
+    label: Variants JSON File
+    type: file
+    supports_location_mode: 'read_only'
+    help: "The variants JSON file to be used for expansion hunter analysis. Defaults to the appropriate catalog in the server resources folder."
+    optional: true
+
+  - name: sex
+    label: Sample Sex
+    type: enum
+    choices: [Male, Female, Unknown]
+    help: "The sex of the sample. If not provided, the workflow will search for an entry in the Workspace Sample Catalog. If no entry is found, the sample will be assumed to be female (no haploid regions)."
+    optional: true
+    group: Advanced Options
+
+  - name: min_locus_coverage
+    label: Minimum Locus Coverage
+    type: integer
+    value: 10
+    help: "Specifies minimum read coverage depth at loci on diploid chromosomes required to attempt genotyping. Automatically reduced to half for loci on haploid chromosomes. The locus will be skipped if the coverage falls below this value."
+    group: Advanced Options
+
+  - name: region_extension_length
+    label: Region Extension Length
+    type: integer
+    value: 1000
+    help: "Specifies how far from on/off-target regions to search for informative reads."
+    group: Advanced Options
+
+  - name: mode
+    label: Analysis Mode
+    type: enum
+    choices: [seeking, streaming]
+    value: "seeking"
+    help: "Specify analysis mode, which can be either `seeking` or `streaming`. The default mode is `seeking`."
+    group: Advanced Options
+
+steps:
+  - name: expansionhunter
+    type: cmd
+    description: Run ExpansionHunter
+    docker: 
+      image: registry.goldenhelix.com/public/expansionhunter:5.0.0-ghi
+    args:
+      - |- # shell
+        set -euo pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        #############################
+        # Set up environment
+        #############################
+
+        cd /scratch
+
+        #############################
+        # Verify and copy reference file
+        #############################
+
+        echo "Selecting reference file..."
+        if [ -z "$ref_fasta" ]; then
+            echo "No reference file provided, using default reference file..."
+            ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+            if [ ! -f "$ref_fasta" ]; then
+                echo "Error: Default reference file does not exist at: $ref_fasta"
+                echo "Please run the task 'Download Genomic Reference' to download the reference and then re-run this task."
+                exit 1
+            fi
+        fi
+
+        echo "Copying reference file: $(basename "$ref_fasta")"
+        cp "$ref_fasta" . || { echo "Error: Failed to copy reference file"; exit 1; }
+        cp "$ref_fasta.fai" . || { echo "Error: Failed to copy reference index file"; exit 1; }
+        local_ref_fasta="$(basename "$ref_fasta")"
+        echo "Reference file ready: $local_ref_fasta"
+
+        #############################
+        # Verify and copy variants JSON file
+        #############################
+
+        echo "Selecting variants JSON file..."
+        if [ -z "$variants_json" ]; then
+            echo "No variants JSON file provided, using default variants JSON file..."
+            # Use workspace assembly variable to select the appropriate variants JSON
+            case "${GH_WORKSPACE_ASSEMBLY}" in
+                GRCh_37*)
+                    assembly_dir="grch37"
+                    ;;
+                *)
+                    assembly_dir="grch38"
+                    ;;
+            esac
+            variants_json="${TASK_DIR}/../.resources/eh_variant_catalog_${assembly_dir}.json"
+            if [ ! -f "$variants_json" ]; then
+                echo "Error: Default variants JSON file does not exist at: $variants_json"
+                echo "Please run the task 'Download Variants JSON' to download the variants JSON and then re-run this task."
+                exit 1
+            fi
+        fi
+
+        echo "Copying variants JSON file: $(basename "$variants_json")"
+        cp "$variants_json" . || { echo "Error: Failed to copy variants JSON file"; exit 1; }
+        local_variants_json="$(basename "$variants_json")"
+        echo "Variants JSON file ready: $local_variants_json"
+
+        #############################
+        # Verify and copy input files
+        #############################
+
+        echo "Verifying and copying input files..."
+        echo "Available space in workdir: $(df -h /scratch | awk 'NR==2 {print $4}')"
+        
+        input_basename="$(basename "$input_file")"
+        echo "Copying input file: $input_basename"
+        cp "$input_file" . || { echo "Error: Failed to copy input file to workdir"; exit 1; }
+        
+        # Copy index file based on input file type
+        if [[ "$input_basename" == *.bam ]]; then
+            if [ -f "${input_file}.bai" ]; then
+                echo "Copying BAM index file..."
+                cp "${input_file}.bai" . || { echo "Warning: Failed to copy BAM index file"; }
+            else
+                echo "Warning: BAM index file (${input_file}.bai) not found; downstream tools may require it."
+            fi
+        elif [[ "$input_basename" == *.cram ]]; then
+            if [ -f "${input_file}.crai" ]; then
+                echo "Copying CRAM index file..."
+                cp "${input_file}.crai" . || { echo "Warning: Failed to copy CRAM index file"; }
+            else
+                echo "Warning: CRAM index file (${input_file}.crai) not found; downstream tools may require it."
+            fi
+        else
+            echo "Warning: Input file is neither .bam nor .cram. No index will be copied."
+        fi
+        echo "Input files copied successfully"
+
+        #############################
+        # Determine sample name
+        #############################
+
+        echo "Determining sample name..."
+        if [ -z "$sample_name" ]; then
+            echo "No sample name provided, inferring from input file name..."
+            sample_name="$(basename "$input_file" | cut -d '_' -f 1)"
+        fi
+        echo "Sample name: $sample_name"
+
+        #############################
+        # Determine sample sex
+        #############################
+
+        echo "Determining sample sex..."
+        if [ "$sex" = "Male" ]; then
+            sex="male"
+        elif [ "$sex" = "Female" ]; then
+            sex="female"
+        elif [ -z "$sex" ]; then
+            echo "No sample sex provided, querying sample catalog..."
+            sex=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Sex" 2>/dev/null | tail -n 1 | tr -d '\r\n\t ' || true)
+            if [ -z "$sex" ]; then
+                echo "Warning: Could not determine sex for sample '$sample_name' from catalog, defaulting to 'Female'"
+                sex="female"
+            else
+                echo "Found sex in catalog: $sex"
+            fi
+        fi
+        echo "Using sample sex: $sex"
+
+        #############################
+        # Run ExpansionHunter
+        #############################
+
+        # Print info
+        echo "================================================"
+        echo "🚀 STARTING EXPANSIONHUNTER ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Input File: $input_basename ($(format_file_size "$input_file"))"
+        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+        echo "  - Variant Catalog: $(basename "$variants_json") ($(format_file_size "$variants_json"))"
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "⚙️  Configuration:"
+        echo "  - Sex: $sex"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        echo "  - Min Locus Coverage: $min_locus_coverage"
+        echo "  - Region Extension Length: $region_extension_length"
+        echo "  - Analysis Mode: $mode"
+        echo "================================================"
+
+        # Run ExpansionHunter
+        EXPANSIONHUNTER_START_TIME=$(date +%s)
+        
+        ExpansionHunter \
+            --reads "$input_basename" \
+            --reference "$local_ref_fasta" \
+            --variant-catalog "$local_variants_json" \
+            --output-prefix "$sample_name" \
+            --sex "$sex" \
+            --threads "$AGENT_CPU_CORES" \
+            --min-locus-coverage "$min_locus_coverage" \
+            --region-extension-length "$region_extension_length" \
+            --analysis-mode "$mode"
+
+        EXPANSIONHUNTER_END_TIME=$(date +%s)
+        EXPANSIONHUNTER_DURATION=$((EXPANSIONHUNTER_END_TIME - EXPANSIONHUNTER_START_TIME))
+        EXPANSIONHUNTER_DURATION_HOUR=$((EXPANSIONHUNTER_DURATION / 3600))
+        EXPANSIONHUNTER_DURATION_MIN=$(((EXPANSIONHUNTER_DURATION % 3600) / 60))
+        EXPANSIONHUNTER_DURATION_SEC=$((EXPANSIONHUNTER_DURATION % 60))
+
+        #############################
+        # Process and copy output files
+        #############################
+
+        echo "Processing output files..."
+        
+        # Extract current sample name from VCF and rename to correct sample name
+        echo "Renaming sample in VCF file..."
+        current_sample=$(grep "^#CHROM" "$sample_name.vcf" | awk '{print $10}' || echo "")
+        if [ -n "$current_sample" ] && [ "$current_sample" != "$sample_name" ]; then
+            echo "  - Current sample name in VCF: $current_sample"
+            echo "  - Renaming to: $sample_name"
+            
+            # Try bcftools reheader first (most reliable method)
+            if command -v bcftools &> /dev/null; then
+                echo "  - Using bcftools reheader..."
+                echo "${current_sample} ${sample_name}" > /scratch/sample_rename.txt
+                if bcftools reheader -s /scratch/sample_rename.txt "$sample_name.vcf" > "${sample_name}_ehunter.vcf" 2>/dev/null; then
+                    echo "  - Sample name updated using bcftools reheader"
+                else
+                    echo "  - bcftools reheader failed, using sed method..."
+                    # Fallback to sed method: replace sample name in #CHROM line
+                    sed "s/\t${current_sample}\$/\t${sample_name}/" "$sample_name.vcf" > "${sample_name}_ehunter.vcf"
+                fi
+                rm -f /scratch/sample_rename.txt
+            else
+                # Fallback to sed method if bcftools not available
+                echo "  - Using sed method (bcftools not available)..."
+                sed "s/\t${current_sample}\$/\t${sample_name}/" "$sample_name.vcf" > "${sample_name}_ehunter.vcf"
+            fi
+            echo "  - Sample name updated successfully"
+        else
+            echo "  - Sample name already correct or not found, using original VCF"
+            mv "$sample_name.vcf" "${sample_name}_ehunter.vcf" || { echo "Error: Failed to rename VCF file"; exit 1; }
+        fi
+        
+        # Add missing header fields and convert RL from INFO to FORMAT
+        echo "Processing VCF header and converting RL from INFO to FORMAT..."
+        
+        # Remove RL as INFO field from header if present
+        if grep -q "^##INFO=<ID=RL," "${sample_name}_ehunter.vcf" 2>/dev/null; then
+            echo "  - Removing RL (Repeat Length) INFO field from header..."
+            grep -v "^##INFO=<ID=RL," "${sample_name}_ehunter.vcf" > "${sample_name}_ehunter.tmp.vcf"
+            mv "${sample_name}_ehunter.tmp.vcf" "${sample_name}_ehunter.vcf"
+        else
+            echo "  - RL INFO field not present in header (no removal needed)"
+        fi
+        
+        # Add RU as INFO field if not present
+        if ! grep -q "^##INFO=<ID=RU," "${sample_name}_ehunter.vcf" 2>/dev/null; then
+            echo "  - Adding RU (Repeat Unit) INFO field..."
+            awk '/^#CHROM/ { 
+                print "##INFO=<ID=RU,Number=1,Type=String,Description=\"Repeat unit\">"
+            } 1' "${sample_name}_ehunter.vcf" > "${sample_name}_ehunter.tmp.vcf"
+            mv "${sample_name}_ehunter.tmp.vcf" "${sample_name}_ehunter.vcf"
+        else
+            echo "  - RU INFO field already present in header"
+        fi
+        
+        # Add RL as FORMAT field if not present
+        if ! grep -q "^##FORMAT=<ID=RL," "${sample_name}_ehunter.vcf" 2>/dev/null; then
+            echo "  - Adding RL (Repeat Length) FORMAT field..."
+            awk '/^#CHROM/ { 
+                print "##FORMAT=<ID=RL,Number=1,Type=Integer,Description=\"Repeat length\">"
+            } 1' "${sample_name}_ehunter.vcf" > "${sample_name}_ehunter.tmp.vcf"
+            mv "${sample_name}_ehunter.tmp.vcf" "${sample_name}_ehunter.vcf"
+        else
+            echo "  - RL FORMAT field already present in header"
+        fi
+        
+        # Convert RL from INFO to FORMAT on each data line
+        echo "  - Converting RL from INFO column to FORMAT column..."
+        awk 'BEGIN {FS=OFS="\t"} {
+            # Process header lines - skip all lines starting with #
+            if ($1 ~ /^#/) {
+                print
+                next
+            }
+            
+            # Process data lines
+            # Extract RL from INFO column and remove it
+            rl_value = ""
+            n = split($8, info_fields, ";")
+            new_info = ""
+            for (i = 1; i <= n; i++) {
+                if (info_fields[i] ~ /^RL=/) {
+                    # Extract RL value and exclude from new_info
+                    split(info_fields[i], rl_pair, "=")
+                    rl_value = rl_pair[2]
+                } else if (info_fields[i] != "") {
+                    # Keep other INFO fields (excluding RL)
+                    if (new_info != "") new_info = new_info ";"
+                    new_info = new_info info_fields[i]
+                }
+            }
+            $8 = new_info
+            
+            # Add RL to FORMAT column if not already present
+            if (index($9, "RL") == 0) {
+                $9 = $9 ":RL"
+            }
+            
+            # Add RL value to sample column
+            if (rl_value != "") {
+                $10 = $10 ":" rl_value
+            } else {
+                $10 = $10 ":."
+            }
+            
+            print
+        }' "${sample_name}_ehunter.vcf" > "${sample_name}_ehunter.tmp.vcf"
+        mv "${sample_name}_ehunter.tmp.vcf" "${sample_name}_ehunter.vcf"
+        echo "  - RL conversion completed"
+        
+        echo "Compressing VCF file..."
+        bgzip "${sample_name}_ehunter.vcf" || { echo "Error: Failed to compress VCF file"; exit 1; }
+        echo "Indexing VCF file..."
+        tabix -f -p vcf "${sample_name}_ehunter.vcf.gz" || { echo "Warning: Failed to index VCF file"; if [ ! -f "${sample_name}_ehunter.vcf.gz.tbi" ]; then echo "Index file does not exist, exiting..."; exit 1; else echo "Index file exists, continuing..."; fi; }
+
+        # Rename JSON file
+        mv "${sample_name}.json" "${sample_name}_ehunter.json" || { echo "Error: Failed to rename JSON file"; exit 1; }
+
+        # Copy files to output folder
+        echo "Copying output files to output folder..."
+        cp "${sample_name}_ehunter.vcf.gz" "$output_folder/" || { echo "Error: Failed to copy VCF file"; exit 1; }
+        cp "${sample_name}_ehunter.vcf.gz.tbi" "$output_folder/" || { echo "Error: Failed to copy VCF index file"; exit 1; }
+        cp "${sample_name}_ehunter.json" "$output_folder/" || { echo "Error: Failed to copy JSON file"; exit 1; }
+        
+        # Define output file path for summary
+        output_file="${output_folder}/${sample_name}_ehunter.vcf.gz"
+        output_json="${output_folder}/${sample_name}_ehunter.json"
+
+        #############################
+        # Update vspipeline_inputs.json
+        #############################
+
+        echo "Updating vspipeline_inputs.json..."
+        if [ -f /opt/python/bin/python3 ]; then
+            /opt/python/bin/python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+                --input_dir "$output_folder" \
+                --sample "$sample_name" \
+                --file "$output_file" \
+                --file_type multiverse \
+                --task_name expansionhunter \
+                --scratch_dir "/scratch" || \
+                { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
+        else
+            echo "Warning: python3 not available in Docker container, skipping vspipeline_inputs.json update"
+        fi
+
+        # Post-execution logging
+        echo "================================================"
+        echo "✅ EXPANSIONHUNTER ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${EXPANSIONHUNTER_DURATION_HOUR}h ${EXPANSIONHUNTER_DURATION_MIN}m ${EXPANSIONHUNTER_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - VCF: $(basename "$output_file") ($(format_file_size "$output_file"))"
+        echo "  - JSON: $(basename "$output_json") ($(format_file_size "$output_json"))"
+        echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "================================================"

@@ -1,0 +1,387 @@
+name: CNV Calling with Sentieon CNVscope
+description: CNV calling from an alignment file with Sentieon's CNVscope algorithm (suitable only for WGS data)
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 32
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: true
+    help: "The name of the sample to be used in the output VCF file. If not provided, the sample name will be inferred from the input BAM file."
+
+  - name: sex
+    label: Sample Sex
+    type: enum
+    choices: [Male, Female, Unknown]
+    optional: true
+    help: "The sex of the sample. If not provided, the workflow will search for an entry in the Workspace Sample Catalog. If no entry is found, the sample will be assumed to be female (no haploid regions)."
+
+  - name: input_file
+    label: Input Deduplicated BAM File
+    type: file
+    supports_location_mode: 'read_only'
+    pattern_match:
+      - "*.bam"
+      - "*.cram"
+    help: "The input deduplicated WGS BAM file. Must be sorted and indexed."
+    
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The output folder for the resulting CNV VCF file."
+
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "The reference file (FASTA) to use for the CNV calling. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
+
+  - name: ml_model
+    value: "Illumina WGS 2.2"
+    label: Machine Learning Model
+    type: enum
+    choices: [Illumina WGS 2.2]
+    optional: false
+    help: "The machine learning model to use for the CNV calling. See Sentieon's GitHub page for more information."
+
+steps:
+  - name: cnvscope
+    description: Run Sentieon CNVscop 
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+
+        num_threads=$AGENT_CPU_CORES
+        workdir="/scratch"
+        
+        # Create output directory and set up logging
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
+        
+        # Define sample name early for logging
+        if [ -z "$sample_name" ]; then
+            sample_name=$(basename "$input_file" | cut -d '_' -f 1)
+        fi
+        
+        logfile="${sample_name}_cnvscope_run.log"
+        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+        
+        # Select reference file
+        if [ -z "$ref_fasta" ]; then
+            ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+            if [ ! -f "$ref_fasta" ]; then
+                echo "The default reference file does not exist at $ref_fasta"
+                echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+                exit 1
+            fi
+        fi
+
+        # Copy reference file to work directory
+        echo "Copying reference file to work directory..."
+        start_time=$SECONDS
+        cp "$ref_fasta" . || { echo "Failed to copy reference FASTA"; exit 1; }
+        cp "$ref_fasta".fai . || { echo "Failed to copy reference FASTA index"; exit 1; }
+        local_ref_fasta="$(basename "$ref_fasta")"
+        echo "Reference file copied to $local_ref_fasta in $((SECONDS - start_time)) seconds"
+        
+        # Check and copy input files
+        echo "Checking and copying input files..."
+        echo "Available space in workdir: $(df -h /scratch | awk 'NR==2 {print $4}')"
+        input_basename="$(basename "$input_file")"
+        echo "Copying input file $input_file to workdir..."
+        cp "$input_file"* . || { echo "Failed to copy input files to workdir"; exit 1; }
+        echo "Input files copied to workdir"
+
+        # Select model file
+        model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+
+        echo "Selecting model file..."
+        case "$ml_model" in
+
+          "Illumina WGS 2.2")
+            model_path="${model_base_path}/SentieonIlluminaWGS2.2.bundle"
+            ;;
+
+          *)
+            model_path=""
+            ;;
+
+        esac
+
+        # Check that model file exists
+        if [ ! -f "$model_path" ]; then
+            echo "The model file does not exist at $model_path"
+            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+            exit 1
+        fi
+
+        echo "Sample name: $sample_name"
+
+        # Check for sex information
+        # If not provided, search sample catalog with gautil
+        if [ -z "$sex" ]; then
+          echo "Looking up sample sex for: $sample_name"
+          set +e
+          sex=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Sex" | tail -n 1 | tr -d '\r\n\t ')
+          sex_lookup_exit_code=$?
+          set -e
+          
+          if [ $sex_lookup_exit_code -ne 0 ] || [ -z "$sex" ] || [ "$sex" != "Male" ] && [ "$sex" != "Female" ]; then
+            echo "Warning: Could not determine sex for sample $sample_name (exit code: $sex_lookup_exit_code, value: '$sex'), defaulting to Female"
+            sex="Female"
+          fi
+        fi
+
+        # Generate BED files from reference FASTA index based on Sex
+        echo "Generating BED files from reference FASTA index..."
+        ref_fai="${local_ref_fasta}.fai"
+        
+        if [ ! -f "$ref_fai" ]; then
+            echo "Error: Reference FASTA index file not found at $ref_fai"
+            exit 1
+        fi
+        
+        # Generate autosomes BED file (chromosomes 1-22)
+        # Handles both "chr1" and "1" formats
+        autosomes_bed="$workdir/autosomes.bed"
+        echo "Creating autosomes BED file: $autosomes_bed"
+        awk -v autosomes_bed="$autosomes_bed" '
+        {
+            chr_name = $1
+            chr_length = $2
+            
+            chr_num = chr_name
+            gsub(/^chr/, "", chr_num)
+            chr_num = toupper(chr_num)
+            
+            # Check if it is an autosome (1-22) - convert to number for proper numeric comparison
+            if (chr_num ~ /^[0-9]+$/) {
+                chr_num_int = chr_num + 0  # Convert to number
+                if (chr_num_int >= 1 && chr_num_int <= 22) {
+                    print chr_name "\t0\t" chr_length > autosomes_bed
+                }
+            }
+        }' "$ref_fai"
+        
+        if [ ! -s "$autosomes_bed" ]; then
+            echo "Warning: No autosomes found in reference index. BED file may be empty."
+        else
+            echo "Autosomes BED file created with $(wc -l < "$autosomes_bed") entries"
+        fi
+        
+        haploid_bed=""
+        if [ "$sex" = "Male" ]; then
+            haploid_bed="$workdir/haploid_xy.bed"
+            echo "Creating haploid X/Y BED file for Male sample: $haploid_bed"
+            awk -v haploid_bed="$haploid_bed" '
+            {
+                chr_name = $1
+                chr_length = $2
+                
+                chr_num = chr_name
+                gsub(/^chr/, "", chr_num)
+                chr_num = toupper(chr_num)
+                
+                if (chr_num == "X" || chr_num == "Y") {
+                    print chr_name "\t0\t" chr_length > haploid_bed
+                }
+            }' "$ref_fai"
+            
+            if [ ! -s "$haploid_bed" ]; then
+                echo "Warning: No X or Y chromosomes found in reference index. Haploid BED file may be empty."
+            else
+                echo "Haploid X/Y BED file created with $(wc -l < "$haploid_bed") entries"
+            fi
+        else
+            echo "Sample is Female or Unknown - no haploid BED file needed"
+        fi
+
+        # Print info before execution
+        echo "================================================"
+        echo "🚀 STARTING CNVSCOPE CNV CALLING"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Input File: $input_basename ($(format_file_size "$input_file"))"
+        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+        echo "  - Sample Sex: $sex"
+        echo "📤 Output Configuration:"
+        echo "  - Output Folder: $output_folder"
+        echo "⚙️  Configuration:"
+        echo "  - ML Model: $ml_model"
+        if [[ ! -z "$model_path" ]]; then
+            echo "  - Model Path: $model_path"
+        fi
+        echo "  - Threads: $num_threads"
+        echo "  - Memory: ${AGENT_MEMORY_GB} GB"
+        if [ "$sex" = "Male" ]; then
+            echo "  - Autosomes BED: $autosomes_bed ($(wc -l < "$autosomes_bed") entries)"
+            echo "  - Haploid X/Y BED: $haploid_bed ($(wc -l < "$haploid_bed") entries)"
+        fi
+        echo "================================================"
+
+        # Run CNVscope (with haploid BED on second pass for Male samples)
+        CNVSCOPE_START_TIME=$(date +%s)
+
+        if [[ "$sex" != "Male" ]]; then
+
+          echo "Processing Female or Unknown sample..."
+
+          if [[ -n "$model_path" ]]; then
+            sentieon driver -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              --model "$model_path/cnv.model" "${sample_name}_cnvscope_tmp.vcf.gz" || \
+              { echo "CNVscope variant calling failed"; exit 1; }
+
+            sentieon driver -t $num_threads -r "$local_ref_fasta" --algo CNVModelApply \
+              --model "$model_path/cnv.model" -v "${sample_name}_cnvscope_tmp.vcf.gz" "${sample_name}_cnvscope.vcf.gz" || \
+              { echo "CNVModelApply failed"; exit 1; }
+          else
+            sentieon driver -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              "${sample_name}_cnvscope.vcf.gz" || \
+              { echo "CNVscope variant calling failed"; exit 1; }
+          fi
+
+        else
+
+          echo "Processing Male sample with haploid BED...."
+
+          if [[ -n "$model_path" ]]; then
+            sentieon driver --interval "$autosomes_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              --model "$model_path/cnv.model" "${sample_name}_cnvscope_diploid_tmp.vcf.gz" || \
+              { echo "CNVscope diploid calling failed"; exit 1; }
+
+            sentieon driver --interval "$haploid_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              --model "$model_path/cnv.model" "${sample_name}_cnvscope_haploid_tmp.vcf.gz" || \
+              { echo "CNVscope haploid calling failed"; exit 1; }
+
+            sentieon driver --interval "$haploid_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVModelApply \
+              --model "$model_path/cnv.model" -v "${sample_name}_cnvscope_haploid_tmp.vcf.gz" "${sample_name}_cnvscope_haploid.vcf.gz" || \
+              { echo "CNVModelApply for haploid regions failed"; exit 1; }
+
+            sentieon driver --interval "$autosomes_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVModelApply \
+              --model "$model_path/cnv.model" -v "${sample_name}_cnvscope_diploid_tmp.vcf.gz" "${sample_name}_cnvscope_diploid.vcf.gz" || \
+              { echo "CNVModelApply for diploid regions failed"; exit 1; }
+          else
+            sentieon driver --interval "$autosomes_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              "${sample_name}_cnvscope_diploid.vcf.gz" || \
+              { echo "CNVscope diploid calling failed"; exit 1; }
+
+            sentieon driver --interval "$haploid_bed" -t $num_threads \
+              -r "$local_ref_fasta" -i "$input_basename" --algo CNVscope \
+              "${sample_name}_cnvscope_haploid.vcf.gz" || \
+              { echo "CNVscope haploid calling failed"; exit 1; }
+          fi
+
+          echo "CNVscope completed successfully; concatenating diploid and haploid VCF files..."
+          
+          # Validate input files exist and are not empty
+          if [ ! -f "${sample_name}_cnvscope_diploid.vcf.gz" ]; then
+            echo "Error: Diploid VCF file not found: ${sample_name}_cnvscope_diploid.vcf.gz"
+            exit 1
+          fi
+          if [ ! -s "${sample_name}_cnvscope_diploid.vcf.gz" ]; then
+            echo "Error: Diploid VCF file is empty: ${sample_name}_cnvscope_diploid.vcf.gz"
+            exit 1
+          fi
+          if [ ! -f "${sample_name}_cnvscope_haploid.vcf.gz" ]; then
+            echo "Error: Haploid VCF file not found: ${sample_name}_cnvscope_haploid.vcf.gz"
+            exit 1
+          fi
+          if [ ! -s "${sample_name}_cnvscope_haploid.vcf.gz" ]; then
+            echo "Error: Haploid VCF file is empty: ${sample_name}_cnvscope_haploid.vcf.gz"
+            exit 1
+          fi
+          
+          # Concatenate the two VCF files
+          bcftools concat -aD \
+            ${sample_name}_cnvscope_haploid.vcf.gz \
+            ${sample_name}_cnvscope_diploid.vcf.gz | \
+            sentieon util vcfconvert - ${sample_name}_cnvscope.vcf.gz || \
+            { echo "bcftools concat failed"; exit 1; }
+
+        fi
+
+        echo "Successfully concatenated and sorted VCF files"
+
+        # Post-execution logging
+        CNVSCOPE_END_TIME=$(date +%s)
+        CNVSCOPE_DURATION=$((CNVSCOPE_END_TIME - CNVSCOPE_START_TIME))
+        CNVSCOPE_DURATION_HOUR=$((CNVSCOPE_DURATION / 3600))
+        CNVSCOPE_DURATION_MIN=$(((CNVSCOPE_DURATION % 3600) / 60))
+        CNVSCOPE_DURATION_SEC=$((CNVSCOPE_DURATION % 60))
+        
+        # Determine output file path
+        output_file="${sample_name}_cnvscope.vcf.gz"
+        
+        # Index the VCF file only if the index file does not already exist
+        if [ ! -f "${output_file}.tbi" ]; then
+          echo "Indexing VCF file..."
+          tabix -f -p vcf "${output_file}" || { echo "Warning: Failed to index VCF file"; if [ ! -f "${output_file}.tbi" ]; then echo "Index file does not exist, exiting..."; exit 1; else echo "Index file exists, continuing..."; fi; }
+        else
+          echo "Index file (${output_file}.tbi) already exists. Skipping indexing."
+        fi
+        
+        # Copy output file and index to output folder
+        echo "Copying output file to output folder..."
+        cp "${output_file}" "$output_folder/" || { echo "Failed to copy output file to output folder"; exit 1; }
+        cp "${output_file}.tbi" "$output_folder/" || { echo "Failed to copy VCF index file to output folder"; exit 1; }
+        final_output_file="$output_folder/${output_file}"
+        
+        echo "================================================"
+        echo "✅ CNVSCOPE CNV CALLING COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${CNVSCOPE_DURATION_HOUR}h ${CNVSCOPE_DURATION_MIN}m ${CNVSCOPE_DURATION_SEC}s"
+        echo "📁 Output File: $(basename "$final_output_file") ($(format_file_size "$final_output_file"))"
+        echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        echo "================================================"
+        
+        # Update vspipeline_inputs.json with the output VCF file
+        echo "Updating vspipeline_inputs.json..."
+        if ! command -v python3 &> /dev/null; then
+            echo "python3 not found, attempting to install..."
+            # Try to install python3 if available (works on Debian/Ubuntu-based containers)
+            if command -v apt-get &> /dev/null; then
+                apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null 2>&1 || true
+            elif command -v yum &> /dev/null; then
+                yum install -y -q python3 > /dev/null 2>&1 || true
+            fi
+        fi
+        
+        if command -v python3 &> /dev/null; then
+            python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+                --input_dir "$output_folder" \
+                --sample "$sample_name" \
+                --file "$final_output_file" \
+                --file_type cnv \
+                --task_name cnvscope \
+                --scratch_dir "$workdir" || \
+                { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
+        else
+            echo "Warning: python3 not available in Docker container, skipping vspipeline_inputs.json update"
+            echo "The JSON file can be updated manually or via a separate task"
+        fi
+        
+        # Copy log file to output folder
+        cp -f "${logfile}" "$output_folder/" || { echo "Warning: Failed to copy log file to output folder"; }

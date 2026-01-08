@@ -135,7 +135,7 @@ steps:
         # Run vspipeline with tee to capture all output
         set +e
         vspipeline -c batch file="$vsbatch_file" 2>&1 | tee "$log_file"
-        VSPIPELINE_EXIT_CODE=$?
+        VSPIPELINE_EXIT_CODE=${PIPESTATUS[0]}
         set -e
         
         if [ $VSPIPELINE_EXIT_CODE -ne 0 ]; then
@@ -186,3 +186,6 @@ steps:
         echo "*************************"
         echo "VSPipeline Task completed successfully"
         echo "*************************"
+
+        # echo "Updating result.env with project path..."
+        # echo "project_path=${project_path}" >> result.env

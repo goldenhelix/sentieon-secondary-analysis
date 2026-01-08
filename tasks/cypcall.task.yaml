@@ -6,7 +6,6 @@ parameters:
   - name: sample_name
     label: Sample Name
     type: string
-    optional: true
 
   - name: input_file
     label: Input Alignment File
@@ -16,12 +15,17 @@ parameters:
       - "*.bam"
       - "*.cram"
     create: false
-    list: true
 
   - name: output_folder
     label: Output Folder
     type: directory
     supports_location_mode: 'no_append'
+
+  - name: reference_file
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
 
 agent_requirements:
   cpu_cores: 4
@@ -41,7 +45,7 @@ steps:
         source "${TASK_DIR}/utils/utils.sh"
 
         workdir="/scratch"
-        run_id="cypcall_$(date +%s%N)"
+        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
         cypcall_output_dir="${workdir}/output"
 
         case "${GH_WORKSPACE_ASSEMBLY}" in
@@ -53,15 +57,34 @@ steps:
                 ;;
         esac
 
-        # Parse list of input files by cutting list on commas
-        IFS=',' read -ra input_files <<< "$input_file"
-        cypcall_input_file="${workdir}/input_files_${run_id}.txt"
-        for file in "${input_files[@]}"; do
-          echo "$file" >> "$cypcall_input_file"
-        done
-        # Check if more than one input file is provided and sample name is given
-        if [ ${#input_files[@]} -gt 1 ] && [ ! -z "$sample_name" ]; then
-          echo "NOTE: Sample name should not be provided for multiple input files, ignoring sample name"
+        # Write input file to list file for CypCall
+        cypcall_input_file="${workdir}/input_files.txt"
+        echo "$input_file" > "$cypcall_input_file"
+
+        # Check if input file is a CRAM file (CRAM files require reference for decompression)
+        has_cram=false
+        if [[ "$input_file" == *.cram ]]; then
+          has_cram=true
+        fi
+
+        # Only check and copy reference if CRAM file is present
+        if [ "$has_cram" = true ]; then
+          if [ -z "$reference_file" ]; then
+            reference_file="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+            if [ ! -f "$reference_file" ]; then
+              echo "The default reference file does not exist at $reference_file"
+              echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+              exit 1
+            fi
+          fi
+
+          start_time=$SECONDS
+          cp "$reference_file" . || { echo "Failed to copy reference FASTA"; exit 1; }
+          cp "$reference_file".fai . || { echo "Failed to copy reference FASTA index"; exit 1; }
+          local_reference_file="$(basename "$reference_file")"
+          echo "Reference file copied to $local_reference_file in $((SECONDS - start_time)) seconds"
+        else
+          echo "No CRAM file detected in input, skipping reference file copy"
         fi
 
         mkdir -p $cypcall_output_dir
@@ -71,15 +94,9 @@ steps:
         echo "🚀 STARTING CYP2D6 GENOTYPING WITH CYPCALL"
         echo "================================================"
         echo "📅 Server Time: $(date)"
-        echo "📁 Input Files:"
-        echo "  - Input Files: ${#input_files[@]} file(s)"
-        for file in "${input_files[@]}"; do
-          echo "    • $file"
-        done
-        echo "📤 Output Configuration:"
-        echo "  - Output Folder: $output_folder"
-        echo "  - Run ID: $run_id"
-        echo "⚙️  Configuration:"
+        echo "📁 Input File: $input_file"
+        echo "📤 Output Folder: $output_folder"
+        echo "⚙️ CypCall Configuration:"
         echo "  - Assembly: $assembly"
         echo "  - Ambiguity Resolution: lowest_activity"
         echo "  - Threads: $AGENT_CPU_CORES"
@@ -89,10 +106,13 @@ steps:
         # Record start time
         CYPCALL_START_TIME=$(date +%s)
 
-        # Run analysis for all input files
+        # Run CypCall analysis
+        cypcall_prefix="${sample_name}_cypcall"
+        export PYTHONUNBUFFERED=1
         cypcall --input "$cypcall_input_file" \
             --genome $assembly \
-            --prefix $run_id \
+            $( [ "$has_cram" = true ] && echo --reference "$local_reference_file" ) \
+            --prefix "$cypcall_prefix" \
             --ambiguityResolution lowest_activity \
             --outDir ${cypcall_output_dir}
 
@@ -108,15 +128,15 @@ steps:
         echo "⏱️  Execution Time: ${CYPCALL_DURATION_MIN}m ${CYPCALL_DURATION_SEC}s"
 
         # Copy output files
-        cp "${cypcall_output_dir}/${run_id}.json" "${output_folder}"
-        cp "${cypcall_output_dir}/${run_id}_sample_manifest.tsv" "${output_folder}"
+        cp "${cypcall_output_dir}/${cypcall_prefix}.json" "${output_folder}"
+        cp "${cypcall_output_dir}/${cypcall_prefix}_sample_manifest.tsv" "${output_folder}"
 
         echo "📁 Output Files:"
-        echo "  - ${run_id}.json ($(format_file_size "${output_folder}/${run_id}.json"))"
-        echo "  - ${run_id}_sample_manifest.tsv ($(format_file_size "${output_folder}/${run_id}_sample_manifest.tsv"))"
+        echo "  - ${cypcall_prefix}.json ($(format_file_size "${output_folder}/${cypcall_prefix}.json"))"
+        echo "  - ${cypcall_prefix}_sample_manifest.tsv ($(format_file_size "${output_folder}/${cypcall_prefix}_sample_manifest.tsv"))"
         echo "================================================"
 
-        output_tsv="${output_folder}/${run_id}_sample_manifest.tsv"
+        output_tsv="${output_folder}/${cypcall_prefix}_sample_manifest.tsv"
         echo "cypcall_tsv=\"$output_tsv\"" > result.env
         cat result.env
 
@@ -132,7 +152,13 @@ steps:
         export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
 
         cd "${output_folder}"
-        cypcall_tsv=$(ls -t *_sample_manifest.tsv | head -n 1)
+        cypcall_tsv="/scratch/output/${sample_name}_cypcall_sample_manifest.tsv"
+
+        # Error out if file does not exist
+        if [ ! -f "$cypcall_tsv" ]; then
+          echo "Error: File '$cypcall_tsv' not found!"
+          exit 1
+        fi
 
         echo "================================================"
         echo "📊 UPDATING SAMPLE CATALOG"
@@ -154,7 +180,7 @@ steps:
               AlternativeCYP2D6Genotypes="$alt_cyp2d6_genotypes" \
               AllelesTested="$alleles_tested"
           sample_count=$((sample_count + 1))
-        done < <(tail -n +2 "${output_folder}/$cypcall_tsv" | tr '\t' '|')
+        done < <(tail -n +2 "$cypcall_tsv" | tr '\t' '|')
 
         echo "================================================"
         echo "✅ SAMPLE CATALOG UPDATE COMPLETED"

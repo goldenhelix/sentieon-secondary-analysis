@@ -14,11 +14,11 @@ parameters:
     supports_location_mode: 'read_only'
     help: The folder containing the Minimap2 BAM files to merge.
 
-  - name: output_folder
-    label: Output Folder
-    type: directory
-    supports_location_mode: 'no_append'
-    help: Folder where the merged BAM file will be written.
+  - name: merge_failed_reads
+    label: Merge Failed Reads?
+    type: boolean
+    value: false
+    help: If true, merge BAM files containing 'baited_fail_reads' in the merge. If false, exclude them.
 
 agent_requirements:
   cpu_cores: 8
@@ -30,32 +30,29 @@ steps:
     type: cmd
     args:
       - |- # shell
-        set -eu pipefail
+        set -euo pipefail
 
         # Source shared utility functions
         source "${TASK_DIR}/utils/utils.sh"
 
-        # Parameter validation
-        pattern=" | "
-        if [[ "$sample_name" =~ "$pattern" ]]; then
-          echo "Sample name should not contain whitespace"
-          exit 1
-        fi
-
-        # Create output directory if it doesn't exist
-        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
-
         # Use scratch directory for temporary files
         workdir="/scratch"
-        mkdir -p "$workdir" || { echo "Failed to create work directory"; exit 1; }
         cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
+
+        output_folder="${input_folder}"
 
         # Set up logging
         logfile=${sample_name}_merge_minimap2_run.log
         exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
 
         # Find input BAM files matching the pattern (sample_name_*_minimap2.bam)
-        mapfile -t INPUT_BAMS < <(find "$input_folder" -name "${sample_name}.*.minimap2.bam" -type f)
+        if [ "$merge_failed_reads" = "true" ]; then
+          # Include files containing "baited_failed_reads"
+          mapfile -t INPUT_BAMS < <(find "$input_folder" -name "${sample_name}*.minimap2.bam" -o -name "${sample_name}.baited_fail_reads.bam" -type f)
+        else
+          # Exclude files containing "baited_failed_reads"
+          mapfile -t INPUT_BAMS < <(find "$input_folder" -name "${sample_name}*.minimap2.bam" -type f | grep -vi "baited_failed_reads")
+        fi
         
         # Check if no BAM files found
         if [ ${#INPUT_BAMS[@]} -eq 0 ]; then
@@ -67,14 +64,41 @@ steps:
         if [ ${#INPUT_BAMS[@]} -eq 1 ]; then
           echo "Only one BAM file found, copying to output folder"
           output_bam="${output_folder}/${sample_name}.minimap2.bam"
-          cp "${INPUT_BAMS[0]}" "$output_bam" || { echo "Failed to copy BAM file"; exit 1; }
+          
+          # Get absolute paths to compare
+          input_bam_abs=$(readlink -f "${INPUT_BAMS[0]}" || echo "${INPUT_BAMS[0]}")
+          output_bam_abs=$(readlink -f "$output_bam" 2>/dev/null || echo "$output_bam")
+          
+          # Check if source and destination are the same file
+          if [ "$input_bam_abs" = "$output_bam_abs" ]; then
+            echo "Source and destination are the same file, skipping copy"
+          else
+            cp "${INPUT_BAMS[0]}" "$output_bam" || { echo "Failed to copy BAM file"; exit 1; }
+          fi
+          
           if [ -f "${INPUT_BAMS[0]}.bai" ]; then
-            cp "${INPUT_BAMS[0]}.bai" "${output_bam}.bai" || { echo "Failed to copy BAM index"; exit 1; }
+            # Check if index source and destination are the same
+            input_bai_abs=$(readlink -f "${INPUT_BAMS[0]}.bai" || echo "${INPUT_BAMS[0]}.bai")
+            output_bai_abs=$(readlink -f "${output_bam}.bai" 2>/dev/null || echo "${output_bam}.bai")
+            if [ "$input_bai_abs" = "$output_bai_abs" ]; then
+              echo "Index source and destination are the same file, skipping copy"
+            else
+              cp "${INPUT_BAMS[0]}.bai" "${output_bam}.bai" || { echo "Failed to copy BAM index"; exit 1; }
+            fi
           else
             echo "Indexing BAM file..."
             samtools index "$output_bam" || { echo "Failed to index BAM file"; exit 1; }
           fi
           echo "Single BAM file copied successfully"
+          echo "Removing unmerged BAM files from input directory..."
+          # Skip deletion if source and destination are the same
+          if [ "$input_bam_abs" != "$output_bam_abs" ]; then
+            rm -f "${INPUT_BAMS[@]}"
+            rm -f "${INPUT_BAMS[@]}.bai"
+            echo "Unmerged BAM files removed successfully"
+          else
+            echo "Skipping deletion (source and destination are the same file)"
+          fi
           exit 0
         fi
 
@@ -110,7 +134,7 @@ steps:
         echo "BAM files copied to work directory in $((SECONDS - start_time)) seconds"
 
         # Find local BAM files
-        mapfile -t LOCAL_BAMS < <(find "$workdir" -name "${sample_name}.*.minimap2.bam" -type f)
+        mapfile -t LOCAL_BAMS < <(find "$workdir" -name "${sample_name}*.minimap2.bam" -type f)
 
         # Merge BAM files
         echo "Merging BAM files..."
@@ -150,12 +174,19 @@ steps:
         echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
         echo "================================================"
         
-        # Copy log file to output folder
-        cp -f "$logfile" "$output_folder"/ || { echo "Failed to copy log file"; exit 1; }
-        
         # Delete unmerged BAM files from input directory after successful merge
+        # Exclude the output BAM file from deletion if it's in the input list
         echo "Deleting unmerged BAM files from input directory..."
+        output_bam_name="${sample_name}.minimap2.bam"
+        output_bam_path="${output_folder}/${output_bam_name}"
+        
         for bam in "${INPUT_BAMS[@]}"; do
+          # Skip deletion if this file matches the output BAM (check by basename)
+          if [ "$(basename "$bam")" = "$output_bam_name" ] || [ "$bam" = "$output_bam_path" ]; then
+            echo "  - Skipping $(basename "$bam") (this is the output file)"
+            continue
+          fi
+          
           if [ -f "$bam" ]; then
             echo "  - Deleting $(basename "$bam")"
             rm -f "$bam" || { echo "Warning: Failed to delete $bam"; }
@@ -176,12 +207,12 @@ steps:
       image: ${VSPIPELINE_DOCKER_IMAGE}
     args:
       - |- # shell
-        set -eu pipefail
+        set -euo pipefail
 
         export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
 
-        cd "${output_folder}"
-        output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}.minimap2.bam"
+        cd "${input_folder}"
+        output_bam_path="${input_folder//${WORKSPACE_DIR}\//}/${sample_name}.minimap2.bam"
         gautil client catalog-upsert SampleCatalog \
           Sample="$sample_name" \
           BAMPath="$output_bam_path" || \

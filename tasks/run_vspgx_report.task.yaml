@@ -1,0 +1,52 @@
+name: Run VSPGx Report
+description: Run the VSPGx report for a VarSeq project
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 16
+
+parameters:
+  - name: project_path
+    label: Project Path
+    type: file
+    pattern_match:
+      - '*.vsproject'
+    supports_location_mode: 'read_only'
+    path: AppData/Projects
+    help: The path to the VarSeq project to run the report for.
+
+steps:
+  - name: run_vspgx_report
+    description: Run the VSPGx report for a VarSeq project
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "Running VSPGx report for project: $project_path"
+
+        export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
+        if [ -d "$WORKSPACE_DIR/AppData/VarSeq/User Data" ]; then
+          export GH_CRASH_DUMP_DIR="$WORKSPACE_DIR/AppData/VarSeq/User Data"
+        fi
+        if [ -d "/scratch" ]; then
+          export GH_TEMPDIR="/scratch"
+        fi
+
+        if [ ! -d "$project_path" ]; then
+          echo "Error: Project path does not exist: $project_path"
+          exit 1
+        fi
+
+        cd /scratch
+
+        /opt/vspipeline/vspipeline -c project_open "$project_path" \
+          run_project_report "PGX_Report_Template" true true \
+          task_wait \
+          get_task_list \
+          project_close || { echo "VSPGx report failed"; exit 1; }
+
+        echo "VSPGx report completed successfully"

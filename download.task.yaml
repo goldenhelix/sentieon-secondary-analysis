@@ -224,8 +224,8 @@ steps:
             # Bgzip the file
             bgzip "$base_filename" || { echo "Error: Failed to bgzip $base_filename"; return 1; }
             
-            # Tabix the file
-            tabix "$filename" || { echo "Error: Failed to tabix $filename"; return 1; }
+            # Tabix the file (filename is the .gz file after bgzip)
+            tabix -f -p vcf "$filename" || { echo "Warning: Failed to tabix $filename"; if [ ! -f "${filename}.tbi" ]; then echo "Index file does not exist, exiting..."; return 1; else echo "Index file exists, continuing..."; fi; }
             
             echo "✓ $filename successfully processed (gunzip, bgzip, tabix)"
             return 0

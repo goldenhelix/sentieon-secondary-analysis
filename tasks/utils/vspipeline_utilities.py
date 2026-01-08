@@ -6,13 +6,13 @@ This script provides four main modes:
 1. Find sample relationships - analyzes sample metadata to identify related samples
 2. Generate vsbatch file - creates VSBatch files from template and sample data
 3. Update CNV file - adds CNV State field to CNV files based on copy number values
-4. Update vspipeline JSON - creates or updates vspipeline_inputs.json with sample file information
+4. Update vspipeline JSON - creates or updates per-sample, per-task vspipeline_inputs.json files with sample file information
 
 Usage:
     python vspipeline_utilities.py find-relationships --samples <sample_file.txt> [--cohort]
     python vspipeline_utilities.py generate-vsbatch --template <template.vsproject-template> --samples <sample_file.txt>
     python vspipeline_utilities.py update-cnv-file --input <cnv_file.cns> --output <cnv_file_updated.cns>
-    python vspipeline_utilities.py update-vspipeline-json --input_dir <directory> --sample <sample_name> --file <file_path> --file_type <multiverse|cnv|bnd|region>
+    python vspipeline_utilities.py update-vspipeline-json --input_dir <directory> --sample <sample_name> --file <file_path> --file_type <multiverse|cnv|bnd|region> --task_name <task_name> --scratch_dir <scratch_directory>
 """
 
 import argparse
@@ -247,6 +247,49 @@ def _parse_sample_data_json(sample_data_file: str) -> Dict[str, Dict[str, List[s
     except Exception as e:
         print(f"Error parsing sample data JSON: {e}")
         return {}
+
+
+def _merge_vspipeline_json_files(json_files: List[str]) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Merge multiple per-sample, per-task vspipeline_inputs.json files into a single structure.
+    
+    Args:
+        json_files: List of paths to JSON files to merge
+        
+    Returns:
+        Dictionary with sample names as keys and dictionaries containing file lists by type
+        as values (multiverse, cnv, bnd, region)
+    """
+    merged_data = {}
+    
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            samples = data.get('samples', {})
+            
+            for sample_name, sample_info in samples.items():
+                if sample_name not in merged_data:
+                    merged_data[sample_name] = {
+                        'multiverse': [],
+                        'cnv': [],
+                        'bnd': [],
+                        'region': []
+                    }
+                
+                # Merge file lists, avoiding duplicates
+                for file_type in ['multiverse', 'cnv', 'bnd', 'region']:
+                    files = sample_info.get(file_type, [])
+                    for file_path in files:
+                        if file_path not in merged_data[sample_name][file_type]:
+                            merged_data[sample_name][file_type].append(file_path)
+        
+        except Exception as e:
+            print(f"Warning: Error parsing JSON file {json_file}: {e}")
+            continue
+    
+    return merged_data
 
 
 def _generate_vsbatch_content(template_file: str, 
@@ -714,15 +757,19 @@ def _safe_write_json_file(file_path: str, data: Dict[str, Any], max_retries: int
                 raise
 
 
-def update_vspipeline_json(input_dir: str, sample_name: str, file_path: str, file_type: str) -> None:
+def update_vspipeline_json(input_dir: str, sample_name: str, file_path: str, file_type: str, task_name: str, scratch_dir: str) -> None:
     """
-    Create or update vspipeline_inputs.json file with sample file information.
+    Create or update per-sample, per-task vspipeline_inputs.json file with sample file information.
+    Uses a scratch directory to avoid race conditions by copying the file to scratch, editing it,
+    and then copying it back.
     
     Args:
-        input_dir: Directory containing the vspipeline_inputs.json file
+        input_dir: Directory containing the vspipeline_inputs.json file (output directory)
         sample_name: Name of the sample
         file_path: Path to the file to add
         file_type: Type of file ('multiverse', 'cnv', 'bnd', or 'region')
+        task_name: Name of the task (e.g., 'hiphase', 'methbat', 'mitorsaw')
+        scratch_dir: Scratch directory for temporary file operations (e.g., '/scratch')
     """
     # Validate file type
     valid_file_types = ['multiverse', 'cnv', 'bnd', 'region']
@@ -730,17 +777,31 @@ def update_vspipeline_json(input_dir: str, sample_name: str, file_path: str, fil
         print(f"Error: Invalid file type '{file_type}'. Must be one of: {', '.join(valid_file_types)}")
         sys.exit(1)
     
-    # Construct full path to JSON file
-    json_file_path = os.path.join(input_dir, 'vspipeline_inputs.json')
+    # Construct file names
+    json_filename = f'{sample_name}_{task_name}_vspipeline_inputs.json'
+    output_json_path = os.path.join(input_dir, json_filename)
+    scratch_json_path = os.path.join(scratch_dir, json_filename)
     
     print(f"Updating vspipeline_inputs.json in: {input_dir}")
     print(f"Sample: {sample_name}")
+    print(f"Task: {task_name}")
     print(f"File: {file_path}")
     print(f"Type: {file_type}")
+    print(f"Using scratch directory: {scratch_dir}")
     
     try:
-        # Read existing JSON file (or get empty dict if it doesn't exist)
-        data = _safe_read_json_file(json_file_path)
+        # Ensure scratch directory exists
+        os.makedirs(scratch_dir, exist_ok=True)
+        
+        # Copy existing JSON file from output directory to scratch (if it exists)
+        if os.path.exists(output_json_path):
+            print(f"Copying existing JSON file from {output_json_path} to {scratch_json_path}")
+            shutil.copy2(output_json_path, scratch_json_path)
+        else:
+            print(f"JSON file does not exist yet, will create new one in scratch")
+        
+        # Read existing JSON file from scratch (or get empty dict if it doesn't exist)
+        data = _safe_read_json_file(scratch_json_path)
         
         # Initialize structure if needed
         if 'samples' not in data:
@@ -763,10 +824,15 @@ def update_vspipeline_json(input_dir: str, sample_name: str, file_path: str, fil
         else:
             print(f"File already exists in {file_type} list for sample {sample_name}")
         
-        # Write back to file
-        _safe_write_json_file(json_file_path, data)
+        # Write to scratch directory
+        _safe_write_json_file(scratch_json_path, data)
+        print(f"Successfully updated JSON in scratch: {scratch_json_path}")
         
-        print(f"Successfully updated: {json_file_path}")
+        # Copy updated file back to output directory
+        print(f"Copying updated JSON file from {scratch_json_path} to {output_json_path}")
+        shutil.copy2(scratch_json_path, output_json_path)
+        
+        print(f"Successfully updated: {output_json_path}")
         
         # Show current state for this sample
         print(f"\nCurrent state for sample '{sample_name}':")
@@ -780,19 +846,23 @@ def update_vspipeline_json(input_dir: str, sample_name: str, file_path: str, fil
         sys.exit(1)
 
 
-def generate_vsbatch_file(template_file: str, sample_file: str, sample_data_file: str, overwrite_project: bool = True) -> None:
+def generate_vsbatch_file(template_file: str, sample_file: str, sample_data_files: List[str], overwrite_project: bool = True, scratch_dir: str = None) -> None:
     """
     Generate VSBatch file from template and sample data.
+    Uses a scratch directory to copy JSON files before reading them.
     
     Args:
         template_file: Path to .vsproject-template file
         sample_file: Path to CSV file containing sample groups
-        sample_data_file: Path to JSON file containing sample data with file paths
+        sample_data_files: List of paths to JSON files containing sample data with file paths (will be merged)
         overwrite_project: Whether to overwrite existing projects (default: True)
+        scratch_dir: Optional scratch directory for copying JSON files before reading (e.g., '/scratch')
     """
     print(f"Generating VSBatch file from template: {template_file}")
     print(f"Using sample groups from: {sample_file}")
-    print(f"Using sample data from: {sample_data_file}")
+    print(f"Using sample data from {len(sample_data_files)} JSON file(s)")
+    if scratch_dir:
+        print(f"Using scratch directory: {scratch_dir}")
     
     # Validate files exist
     if not os.path.exists(template_file):
@@ -802,12 +872,34 @@ def generate_vsbatch_file(template_file: str, sample_file: str, sample_data_file
     if not os.path.exists(sample_file):
         print(f"Error: Sample file '{sample_file}' does not exist.")
         sys.exit(1)
-        
-    if not os.path.exists(sample_data_file):
-        print(f"Error: Sample data file '{sample_data_file}' does not exist.")
+    
+    # Validate all sample data files exist
+    for sample_data_file in sample_data_files:
+        if not os.path.exists(sample_data_file):
+            print(f"Warning: Sample data file '{sample_data_file}' does not exist, skipping.")
+    
+    # Filter to only existing files
+    existing_files = [f for f in sample_data_files if os.path.exists(f)]
+    if not existing_files:
+        print(f"Error: No valid sample data files found.")
         sys.exit(1)
     
     try:
+        # If scratch directory is provided, copy JSON files there before reading
+        files_to_read = existing_files
+        if scratch_dir:
+            # Ensure scratch directory exists
+            os.makedirs(scratch_dir, exist_ok=True)
+            print(f"Copying {len(existing_files)} JSON file(s) to scratch directory...")
+            scratch_files = []
+            for json_file in existing_files:
+                json_filename = os.path.basename(json_file)
+                scratch_file = os.path.join(scratch_dir, json_filename)
+                shutil.copy2(json_file, scratch_file)
+                scratch_files.append(scratch_file)
+                print(f"  Copied {json_filename} to {scratch_file}")
+            files_to_read = scratch_files
+        
         # Parse template to check for import algorithms and find table IDs
         print("Parsing template file...")
         template_info = _parse_template_file(template_file)
@@ -816,10 +908,10 @@ def generate_vsbatch_file(template_file: str, sample_file: str, sample_data_file
         print(f"Available import algorithms: {import_algorithms}")
         print(f"Found table IDs: {table_ids}")
         
-        # Parse sample data JSON
-        print("Parsing sample data...")
-        sample_data = _parse_sample_data_json(sample_data_file)
-        print(f"Found data for {len(sample_data)} samples")
+        # Merge sample data from all JSON files
+        print(f"Merging sample data from {len(files_to_read)} JSON file(s)...")
+        sample_data = _merge_vspipeline_json_files(files_to_read)
+        print(f"Found data for {len(sample_data)} samples after merging")
         
         # Parse sample groups CSV
         print("Parsing sample groups...")
@@ -882,13 +974,13 @@ Examples:
   python vspipeline_utilities.py find-relationships --samples samples.tsv --output sample_groups.csv --cohort
   
   # Generate VSBatch files
-  python vspipeline_utilities.py generate-vsbatch --template template.vsproject-template --samples sample_groups.csv --sample_files sample_data.json
+  python vspipeline_utilities.py generate-vsbatch --template template.vsproject-template --samples sample_groups.csv --sample_files sample1_hiphase_vspipeline_inputs.json sample2_methbat_vspipeline_inputs.json
   
   # Update CNV file with CNV State field
   python vspipeline_utilities.py update-cnv-file --input cnv_file.cns --output cnv_file_updated.cns
   
   # Update vspipeline_inputs.json file
-  python vspipeline_utilities.py update-vspipeline-json --input_dir /path/to/dir --sample Sample1 --file /path/to/file.vcf.gz --file_type multiverse
+  python vspipeline_utilities.py update-vspipeline-json --input_dir /path/to/dir --sample Sample1 --file /path/to/file.vcf.gz --file_type multiverse --task_name hiphase --scratch_dir /scratch
         """
     )
     
@@ -934,13 +1026,20 @@ Examples:
     generate_parser.add_argument(
         '--sample_files',
         required=True,
-        help='Path to JSON file containing sample data with file paths'
+        nargs='+',
+        help='Path(s) to JSON file(s) containing sample data with file paths (multiple files will be merged)'
     )
     generate_parser.add_argument(
         '--overwrite_project',
         type=str,
         default='true',
         help='Whether to overwrite existing projects (true/false, default: true)'
+    )
+    generate_parser.add_argument(
+        '--scratch_dir',
+        type=str,
+        default=None,
+        help='Optional scratch directory for copying JSON files before reading (e.g., /scratch)'
     )
     
     # Update CNV file mode
@@ -962,7 +1061,7 @@ Examples:
     # Update vspipeline JSON mode
     update_json_parser = subparsers.add_parser(
         'update-vspipeline-json',
-        help='Create or update vspipeline_inputs.json file with sample file information'
+        help='Create or update per-sample, per-task vspipeline_inputs.json file with sample file information'
     )
     update_json_parser.add_argument(
         '--input_dir',
@@ -985,6 +1084,16 @@ Examples:
         choices=['multiverse', 'cnv', 'bnd', 'region'],
         help='Type of file: multiverse, cnv, bnd, or region'
     )
+    update_json_parser.add_argument(
+        '--task_name',
+        required=True,
+        help='Name of the task (e.g., hiphase, methbat, mitorsaw)'
+    )
+    update_json_parser.add_argument(
+        '--scratch_dir',
+        required=True,
+        help='Scratch directory for temporary file operations (e.g., /scratch)'
+    )
     
     # Parse arguments
     args = parser.parse_args()
@@ -1000,11 +1109,12 @@ Examples:
     elif args.mode == 'generate-vsbatch':
         # Convert string to boolean
         overwrite = args.overwrite_project.lower() in ('true', '1', 'yes', 'on')
-        generate_vsbatch_file(args.template, args.samples, args.sample_files, overwrite_project=overwrite)
+        # args.sample_files is already a list due to nargs='+'
+        generate_vsbatch_file(args.template, args.samples, args.sample_files, overwrite_project=overwrite, scratch_dir=args.scratch_dir)
     elif args.mode == 'update-cnv-file':
         update_cnv_file(args.input, args.output)
     elif args.mode == 'update-vspipeline-json':
-        update_vspipeline_json(args.input_dir, args.sample, args.file, args.file_type)
+        update_vspipeline_json(args.input_dir, args.sample, args.file, args.file_type, args.task_name, args.scratch_dir)
     else:
         print(f"Error: Unknown mode '{args.mode}'")
         sys.exit(1)

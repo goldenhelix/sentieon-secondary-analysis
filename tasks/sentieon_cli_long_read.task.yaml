@@ -52,6 +52,7 @@ parameters:
     label: Sentieon Model Base Path
     help: Base path for Sentieon model bundles
     type: directory
+    optional: true
     supports_location_mode: 'read_only'
 
   - name: gvcf
@@ -103,12 +104,6 @@ steps:
         # License configuration
         export SENTIEON_LICENSE="$GH_SERVER:8990"
         licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
-        # if [ "$licsrvr" != "0" ]; then
-        #   echo "License server not responding"
-        #   exit 1
-        # else 
-        #   echo "License server responding"
-        # fi
 
         # Agent setup
         echo "*************************"
@@ -333,7 +328,9 @@ steps:
               --input_dir "$output_folder" \
               --sample "$sample_name" \
               --file "$vcf_file" \
-              --file_type multiverse || \
+              --file_type multiverse \
+              --task_name sentieon_cli_long_read \
+              --scratch_dir "$workdir" || \
               { echo "Warning: Failed to update vspipeline_inputs.json, continuing..."; }
           else
             echo "Warning: VCF file not found at $vcf_file, skipping vspipeline_inputs.json update"
