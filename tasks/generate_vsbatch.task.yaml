@@ -47,11 +47,24 @@ steps:
         # - Groups related samples and generates VSBatch files
         # - Supports multiverse, CNV, breakend, and region file imports based on template capabilities
 
+        echo "*************************"
+        echo "Starting Generate VSBatch File Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - input_folder: $input_folder"
+        echo "  - vsproject_template: $vsproject_template"
+        echo "  - overwrite_project: $overwrite_project"
+        echo "  - cohort: $cohort"
+        echo "*************************"
+
         #############################
         # Set up environment
         #############################
 
         cd /scratch
+
+        # Record start time
+        GENERATE_VSBATCH_START_TIME=$(date +%s)
 
         #############################
         # Find and merge vspipeline_inputs.json files
@@ -160,7 +173,21 @@ steps:
         echo "Sample metadata saved to sample_metadata.tsv"
         echo "Finding related samples..."
 
-        python3 "${TASK_DIR}/utils/vspipeline_utilities.py" find-relationships --samples sample_metadata.tsv --output related_samples.csv
+        # Build find-relationships command
+        find_cmd=(
+            python3 "${TASK_DIR}/utils/vspipeline_utilities.py"
+            find-relationships
+            --samples sample_metadata.tsv
+            --output related_samples.csv
+        )
+        
+        # Add --cohort flag if needed
+        if [ "$cohort" == "true" ]; then
+            find_cmd+=(--cohort)
+        fi
+        
+        # Execute the command
+        "${find_cmd[@]}"
 
         #############################
         # For each set of related samples, generate a VSBatch file
@@ -181,18 +208,15 @@ steps:
             generate-vsbatch
         )
         
-        # Add --cohort flag if needed
-        if [ "$cohort" == "true" ]; then
-            python_cmd+=(--cohort)
-        fi
-        
         # Add template, samples, and all JSON files
         python_cmd+=(--template "$vsproject_template")
         python_cmd+=(--samples "related_samples.csv")
         python_cmd+=(--sample_files "${json_files_array[@]}")
         python_cmd+=(--overwrite_project "$overwrite_project")
         python_cmd+=(--scratch_dir "/scratch")
-        
+
+        echo "Executing Python command: ${python_cmd[@]}"
+
         # Execute the command
         "${python_cmd[@]}" 
 
@@ -206,3 +230,32 @@ steps:
         cp -r ./*.vsbatch "$input_folder"
 
         echo "VSBatch files copied to input folder"
+
+        # Record end time and calculate duration
+        GENERATE_VSBATCH_END_TIME=$(date +%s)
+        GENERATE_VSBATCH_DURATION=$((GENERATE_VSBATCH_END_TIME - GENERATE_VSBATCH_START_TIME))
+        GENERATE_VSBATCH_DURATION_HOUR=$((GENERATE_VSBATCH_DURATION / 3600))
+        GENERATE_VSBATCH_DURATION_MIN=$(((GENERATE_VSBATCH_DURATION % 3600) / 60))
+        GENERATE_VSBATCH_DURATION_SEC=$((GENERATE_VSBATCH_DURATION % 60))
+
+        # List generated VSBatch files
+        vsbatch_files=$(find "$input_folder" -maxdepth 1 -name "*.vsbatch" -type f | sort)
+        vsbatch_count=$(echo "$vsbatch_files" | wc -l)
+
+        echo "================================================"
+        echo "✅ GENERATE VSBATCH FILE TASK COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${GENERATE_VSBATCH_DURATION_HOUR}h ${GENERATE_VSBATCH_DURATION_MIN}m ${GENERATE_VSBATCH_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Generated $vsbatch_count VSBatch file(s):"
+        echo "$vsbatch_files" | while read -r file; do
+            if [ -n "$file" ]; then
+                file_size=$(ls -lh "$file" | awk '{print $5}')
+                echo "    • $(basename "$file") ($file_size)"
+            fi
+        done
+        echo "================================================"
+        echo ""
+        echo "*************************"
+        echo "Generate VSBatch File Task completed successfully"
+        echo "*************************"
