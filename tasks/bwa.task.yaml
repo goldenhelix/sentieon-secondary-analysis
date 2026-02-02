@@ -937,10 +937,17 @@ steps:
         else
           align_extension=".bam"
         fi
+        output_folder_rel=$(echo "$output_folder" | sed "s|^${WORKSPACE_DIR}/||")
         if [[ $perform_dedup == true ]]; then
-          output_bam_path="${output_folder#${WORKSPACE_DIR}/}/${sample_name}_deduped${align_extension}"
+          output_bam_path="${output_folder_rel}/${sample_name}_deduped${align_extension}"
+          output_bam_file="${output_folder}/${sample_name}_deduped${align_extension}"
         else
-          output_bam_path="${output_folder#${WORKSPACE_DIR}/}/${sample_name}_sorted${align_extension}"
+          output_bam_path="${output_folder_rel}/${sample_name}_sorted${align_extension}"
+          output_bam_file="${output_folder}/${sample_name}_sorted${align_extension}"
+        fi
+        if [ ! -f "$output_bam_file" ]; then
+          echo "BAM/CRAM file does not exist at $output_bam_file; skipping catalog update"
+          exit 1
         fi
         cd "${WORKSPACE_DIR}"
         gautil client catalog-upsert SampleCatalog \

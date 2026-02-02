@@ -212,7 +212,13 @@ steps:
         export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
 
         cd "${input_folder}"
-        output_bam_path="${input_folder#${WORKSPACE_DIR}/}/${sample_name}.minimap2.bam"
+        input_folder_rel=$(echo "$input_folder" | sed "s|^${WORKSPACE_DIR}/||")
+        output_bam_path="${input_folder_rel}/${sample_name}.minimap2.bam"
+        output_bam_file="${input_folder}/${sample_name}.minimap2.bam"
+        if [ ! -f "$output_bam_file" ]; then
+          echo "BAM file does not exist at $output_bam_file; skipping catalog update"
+          exit 1
+        fi
         gautil client catalog-upsert SampleCatalog \
           Sample="$sample_name" \
           BAMPath="$output_bam_path" || \
