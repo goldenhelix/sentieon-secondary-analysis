@@ -153,7 +153,7 @@ stages:
 
   - name: Generate VSBatch File for VSPipeline
     description: Generate a VSBatch file for the VSPipeline
-    task_path: tasks/generate_vsbatch.task.yaml
+    task_path: tasks/vspipeline-resources/generate_vsbatch.task.yaml
     run_step: optional_default_skip
     depends_on:
       - Variant Calling with TNscope
@@ -186,7 +186,7 @@ stages:
 
   - name: Create VarSeq Project with VSPipeline
     description: Create a VarSeq project with the VSPipeline based on the VSBatch file
-    task_path: tasks/vspipeline.task.yaml
+    task_path: tasks/vspipeline-resources/vspipeline.task.yaml
     run_step: optional_default_skip
     depends_on:
       - Generate VSBatch File for VSPipeline

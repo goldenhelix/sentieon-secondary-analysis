@@ -375,7 +375,7 @@ steps:
         fi
         
         if command -v python3 &> /dev/null; then
-          python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+          python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
             --input_dir "$output_folder" \
             --sample "$tumor_sample_name" \
             --file "$tumor_vcf" \

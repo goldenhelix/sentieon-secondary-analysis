@@ -44,6 +44,7 @@ stages:
         stage: Prepare Directories
         parameter: input_folder
       glob_ex: '**/*_*.f*q.gz'
+      continue_if_no_match: true
       output_parameters:
         - task_parameter_name: input_folder
           expression: '${file_directory}'
@@ -147,7 +148,7 @@ stages:
         type: file
         supports_location_mode: 'read_only'
         optional: true
-        help: "The must-call VCF file used for PGx diplotyping downstream. If not provided, it will be ommitted. Mutually exclusive with joint-calling and gVCF output."
+        help: "The must-call VCF file used for PGx diplotyping downstream. If not provided, it will be ommitted."
 
       - name: use_must_call_vcf
         label: Use Must-Call VCF
@@ -261,7 +262,7 @@ stages:
 
   - name: Generate VSBatch File for VSPipeline
     description: Generate a VSBatch file for the VSPipeline
-    task_path: tasks/generate_vsbatch.task.yaml
+    task_path: tasks/vspipeline-resources/generate_vsbatch.task.yaml
     run_step: optional_default_skip
     depends_on:
       - Variant Calling with DNAscope
@@ -281,6 +282,7 @@ stages:
         supports_location_mode: 'read_only'
         help: "The template to use for the VarSeq project."
         path: AppData/VarSeq/User Data/ProjectTemplates/
+        value: "AppData/VarSeq/User Data/ProjectTemplates/Sentieon WGS Comprehensive Workflow GRCh38.vsproject-template"
 
       - name: overwrite_project
         label: Overwrite Existing VarSeq Projects
@@ -296,7 +298,7 @@ stages:
 
   - name: Create VarSeq Project with VSPipeline
     description: Create a VarSeq project with the VSPipeline based on the VSBatch file
-    task_path: tasks/vspipeline.task.yaml
+    task_path: tasks/vspipeline-resources/vspipeline.task.yaml
     run_step: optional_default_skip
     depends_on:
       - Generate VSBatch File for VSPipeline
@@ -312,3 +314,34 @@ stages:
       output_parameters:
         - task_parameter_name: vsbatch_file
           expression: '${0}'
+
+  - name: Run VarSeq Reports
+    description: Run relevant reports for the Comprehensive WGS Analysis (STR and VSPGx)
+    task_path: tasks/vspipeline-resources/run_varseq_reports.task.yaml
+    run_step: optional_default_skip
+    depends_on: 
+      - Create VarSeq Project with VSPipeline
+
+    glob_parameter:
+      label: Input Folder
+      path: 
+        type: stage
+        stage: Generate VSBatch File for VSPipeline
+        parameter: input_folder
+      glob_ex: '**/*.vsbatch'
+      output_parameters:
+        - task_parameter_name: vsbatch_file
+          expression: '${0}'
+
+    task_parameters:
+      - name: run_vspgx_report
+        label: Run VSPGx Report
+        type: boolean
+        value: "true"
+        help: "If enabled, the VSPGx report will be run."
+
+      - name: run_str_report
+        label: Run STR Report
+        type: boolean
+        value: "true"
+        help: "If enabled, the STR report will be run."

@@ -17,7 +17,7 @@ This repository contains four comprehensive workflows for different analysis sce
 1. **Targeted Germline Small-Variant Calling** - Short-read germline analysis for panels and exomes
 2. **Long-Read Germline Variant Calling** - Long-read germline analysis for PacBio HiFi and ONT data
 3. **Somatic Tumor/Tumor-Normal Calling** - Short-read somatic analysis with tumor-normal pairing
-4. **Comprehensive Whole-Genome Analysis with PGx** - Complete WGS workflow including pharmacogenomics
+4. **Comprehensive Whole-Genome Analysis with PGx** - Complete WGS workflow including pharmacogenomics and STRs
 
 ## Workflows
 
@@ -179,15 +179,18 @@ The Somatic Tumor/Tumor-Normal Calling workflow performs alignment and variant c
 
 ### 4. Comprehensive Whole-Genome Analysis with PGx
 
-The Comprehensive Whole-Genome Analysis with PGx workflow performs a complete whole-genome analysis including alignment, variant calling, pharmacogenomics (PGx) analysis, and reporting.
+The Comprehensive Whole-Genome Analysis with PGx workflow performs a complete whole-genome analysis including alignment, variant calling, short tandem-repeat calling with ExpansionHunter, pharmacogenomics (PGx) analysis, and reporting.
 
 #### Workflow Stages
 
 1. **Prepare Directories**: Sets up output directory structure
 2. **Alignment with BWA-MEM**: Aligns FASTQ files to a reference genome
 3. **Variant Calling with DNAscope**: Calls germline variants from aligned BAM files
-4. **Pharmacogenomics Analysis with CypCall**: Performs PGx genotyping
-5. **VarSeq PGx Reporting**: Generates PGx reports using VSPGx
+4. **CNV Calling with Sentieon CNVscope**: Calls germline CNVs from aligned BAM files
+5. **Short Tandem Repeat Calling with ExpansionHunter**: Calls STRs with ExpansionHunter
+6. **CYP2D6 Genotyping with CypCall**: Calls CYP2D6 genotypes and updates results in server Sample Catalog
+7. **[OPTIONAL] VSPipeline Project Creation (Batch File Generation and Project Generation)**: In two contingent steps, generate VarSeq project(s) for the samples in the run using the selected VarSeq template
+8. **[OPTIONAL] VarSeq PGx and STR Reporting**: Generates PGx and/or STR reports for the generated VarSeq projects (must have run the previous two steps)
 
 #### Key Features
 
@@ -199,23 +202,35 @@ The Comprehensive Whole-Genome Analysis with PGx workflow performs a complete wh
 
 #### Workflow Parameters
 
-- **Input Folder**: Directory containing FASTQ files
-- **Output Folder**: Directory where results will be stored
-- **Machine Learning Model**: Platform-specific model for optimization
-- **Reference File**: FASTA file for alignment and variant calling (defaults to workspace reference)
-- **Output GVCF**: Generate gVCF format for joint genotyping (default: false)
+The listed workflow parameters are selected by the user upon kicking off a new task. Each required parameter must be input appropriately for the workflow to proceed correctly. 
+
+| Stage                  | Parameter Name     | Type      | Required? | Notes |
+| :--------------------- | :----------------- | :-------: | :-------: | :---- |
+| Prepare Directories    | Input Folder       | Directory | Yes       |       | 
+| Prepare Directories    | Folder Name        | String    | No        | If left blank, the name of the input folder will be used |
+| Prepare Directories    | Base Output Folder | Directory | Yes       |       |
+| Alignment with BWA-MEM | Output CRAM        | Boolean   | Yes       | If de-selected, the workflow will produce BAMs |
+| Alignment with BWA-MEM | Machine Learning Model | Enum   | Yes       | Platform-specific model (e.g., Illumina WGS 2.2, Element Biosciences WGS 2.1, MGI WGS 2.1, Salus WGS 1.0, Ultima Genomics WGS 1.1) |
+| Alignment with BWA-MEM | Sentieon Models Base Path | Directory | No | Optional path to Sentieon models (Advanced Options) |
+| Alignment with BWA-MEM | Reference File (FASTA) | File | No | Optional reference file; defaults to workspace reference if not provided |
+| Variant Calling with DNAscope | PGX Must-Call VCF | File | No | If not provided, the default track containing relevant PGx positions will be used |
+| Variant Calling with DNAscope | Call SV | Boolean | Yes | Set to true to call structural variants using Sentieon's SV calling algorithm |
+| Generate VSBatch File for VSPipeline | VarSeq Project Template | File | Yes | The default template, downloaded with this repository, includes all of the necessary algorithms and configurations to work with downstream steps. |
+| Generate VSBatch File for VSPipeline | Overwrite Existing VarSeq Projects | Boolean | Yes | |
+| Generate VSBatch File for VSPipeline | Cohort Mode | Boolean | Yes | If disabled, samples will be grouped into projects based on sample relationships found in the server Sample Catalog |
+| Run VarSeq Reports | Run VSPGx Report | Boolean | Yes | |
+| Run VarSeq Reports | Run STR Report | Boolean | Yes | | 
 
 #### Input Requirements
 
 - **File Format**: FASTQ files (`.fastq.gz` or `.fq.gz`)
-- **SampleCatalog**: Expected fields include `PGxGenotypes`, `AlternativeCYP2D6Genotypes`, and `AllelesTested`
+- **SampleCatalog**: Expected fields include `PGxGenotypes`, `AlternativeCYP2D6Genotypes`, and `AllelesTested`. Additionally, family and tumor/normal relationships will be queried to define VarSeq project groupings if cohort mode is disabled. 
 - **Naming Convention**: Files should follow the pattern `{sample_name}_*.fastq.gz`
 
 #### Output Files
 
 - **Aligned BAM**: `{sample_name}.bam` - Aligned reads
-- **VCF**: `{sample_name}.vcf.gz` - Called variants
-- **gVCF**: `{sample_name}.g.vcf.gz` - Genomic VCF format (if enabled)
+- **Small Variant VCF**: `{sample_name}.vcf.gz` - Called variants
 - **PGx Reports**: Pharmacogenomics analysis reports
 - **Metrics**: Alignment, quality, and PGx metrics
 

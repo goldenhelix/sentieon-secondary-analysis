@@ -493,7 +493,7 @@ steps:
           fi
           
           if command -v python3 &> /dev/null; then
-            python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
               --input_dir "$output_folder" \
               --sample "$sample_name" \
               --file "$output_file" \
@@ -505,7 +505,7 @@ steps:
             # Update vspipeline_inputs.json with SV VCF file if SV calling was enabled
             if [[ "$call_svs" = true ]]; then
               sv_output_file="${output_folder}/${sample_name}_sv.vcf.gz"
-              python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+              python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
                 --input_dir "$output_folder" \
                 --sample "$sample_name" \
                 --file "$sv_output_file" \

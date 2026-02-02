@@ -324,7 +324,7 @@ steps:
           # Update vspipeline_inputs.json with the output VCF file
           vcf_file="${output_folder}/${sample_name}.vcf.gz"
           if [ -f "$vcf_file" ]; then
-            python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
               --input_dir "$output_folder" \
               --sample "$sample_name" \
               --file "$vcf_file" \

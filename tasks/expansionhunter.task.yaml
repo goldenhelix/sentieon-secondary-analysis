@@ -386,7 +386,7 @@ steps:
 
         echo "Updating vspipeline_inputs.json..."
         if [ -f /opt/python/bin/python3 ]; then
-            /opt/python/bin/python3 "${TASK_DIR}/utils/vspipeline_utilities.py" update-vspipeline-json \
+            /opt/python/bin/python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
                 --input_dir "$output_folder" \
                 --sample "$sample_name" \
                 --file "$output_file" \

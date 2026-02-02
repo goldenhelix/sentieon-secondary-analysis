@@ -67,15 +67,12 @@ steps:
         # Source shared utility functions
         source "${TASK_DIR}/utils/utils.sh"
 
+        # Set up resource paths based on resources_path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifi-wdl-resources-v3.1.0"
+
         # License configuration
         export SENTIEON_LICENSE="$GH_SERVER:8990"
         licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
-
-        # Check if this is a failed target - skip alignment if true
-        if [ "$failed_target" = "true" ]; then
-          echo "Skipping alignment for failed target"
-          exit 0
-        fi
 
         # Agent setup
         echo "*************************"
@@ -99,6 +96,24 @@ steps:
         echo "Sample ID: $sample_id"
         echo "*************************"
 
+        # Create output directory if it doesn't exist
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+
+        # Use scratch directory for temporary files
+        workdir="/scratch"
+        mkdir -p "$workdir" || { echo "Failed to create work directory"; exit 1; }
+        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
+
+        echo "*************************"
+        echo "Starting Sentieon minimap2 alignment for $sample_id"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - sample_id: $sample_id"
+        echo "  - alignment_file: $alignment_file"
+        echo "  - output_folder: $output_folder"
+        echo "  - failed_target: $failed_target"
+        echo "*************************"
+
         # Extract unique identifier as is, then cut on '.' and keep first string (ensure no '.' in unique id)
         input_basename=$(basename "$alignment_file")
         # Replicate original unique id extraction logic as before
@@ -113,145 +128,466 @@ steps:
 
         # Define output filename with unique identifier
         output_bam="${output_folder}/${sample_id}.${input_unique_id}.minimap2.bam"
-        #if [ -f "${output_bam}" ]; then
-        #  echo "Output already exists: ${output_bam}"
-        #  exit 0
-        #fi
 
-        # Create output directory if it doesn't exist
-        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+        if [ "$failed_target" = false ]; then
 
-        # Use scratch directory for temporary files
-        workdir="/scratch"
-        mkdir -p "$workdir" || { echo "Failed to create work directory"; exit 1; }
-        cd "$workdir" || { echo "Failed to change to work directory"; exit 1; }
-        
-        # Set up logging
-        logfile=${sample_id}_minimap2_run.log
-        exec > >(tee -a "$logfile") 2>&1 || { echo "Failed to redirect stdout and stderr to $logfile"; exit 1; }
+          # Select reference file
+          echo "Selecting reference file..."
+          if [ -z "$ref_fasta" ]; then
+            echo "No reference file provided, using default reference file..."
+            ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
+            if [ ! -f "$ref_fasta" ]; then
+              echo "The default reference file does not exist at $ref_fasta"
+              echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+              exit 1
+            fi
+          fi
 
-        # Select reference file
-        echo "Selecting reference file..."
-        if [ -z "$ref_fasta" ]; then
-          echo "No reference file provided, using default reference file..."
-          ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
-          if [ ! -f "$ref_fasta" ]; then
-            echo "The default reference file does not exist at $ref_fasta"
-            echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
+          echo "================================================"
+          echo "🚀 STARTING SENTIEON MINIMAP2 ALIGNMENT"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - Input File: $(basename "$alignment_file") ($(format_file_size "$alignment_file"))"
+          echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
+          echo "📤 Output Configuration:"
+          echo "  - Output File: $(basename "$output_bam")"
+          echo "⚙️  Configuration:"
+          echo "  - Sample ID: $sample_id"
+          echo "  - Technology: $tech"
+          echo "  - Threads: $AGENT_CPU_CORES"
+          echo "  - Memory: ${mem_gb}GB"
+          echo "================================================"
+          
+          # Record start time
+          MINIMAP2_START_TIME=$(date +%s)
+
+          # Select model base path
+          if [ -z "$model_base_path" ]; then
+            echo "No model base path provided, using default model base path..."
+            model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+            if [ ! -d "$model_base_path" ]; then
+              echo "The default models do not exist at $model_base_path"
+              echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+              exit 1
+            fi
+          fi
+
+          # Select model bundle based on technology
+          if [ "$tech" == "ONT" ]; then
+            model_bundle="${model_base_path}/DNAscopeONT2.1.bundle"
+          elif [ "$tech" == "HiFi" ]; then
+            model_bundle="${model_base_path}/DNAscopePacBio2.1.bundle"
+          else
+            echo "Invalid technology: $tech"
             exit 1
           fi
-        fi
 
-        echo "================================================"
-        echo "🚀 STARTING SENTIEON MINIMAP2 ALIGNMENT"
-        echo "================================================"
-        echo "📅 Server Time: $(date)"
-        echo "📁 Input Files:"
-        echo "  - Input File: $(basename "$alignment_file") ($(format_file_size "$alignment_file"))"
-        echo "  - Reference FASTA: $(basename "$ref_fasta") ($(format_file_size "$ref_fasta"))"
-        echo "📤 Output Configuration:"
-        echo "  - Output File: $(basename "$output_bam")"
-        echo "⚙️  Configuration:"
-        echo "  - Sample ID: $sample_id"
-        echo "  - Technology: $tech"
-        echo "  - Threads: $AGENT_CPU_CORES"
-        echo "  - Memory: ${mem_gb}GB"
-        echo "================================================"
-        
-        # Record start time
-        MINIMAP2_START_TIME=$(date +%s)
-
-        # Select model base path
-        if [ -z "$model_base_path" ]; then
-          echo "No model base path provided, using default model base path..."
-          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
-          if [ ! -d "$model_base_path" ]; then
-            echo "The default models do not exist at $model_base_path"
-            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+          if [ ! -f "$model_bundle" ]; then
+            echo "Model bundle does not exist at $model_bundle. Please run the task Download Sentieon Models to download the models and then re-run this task"
             exit 1
           fi
-        fi
+          echo "Using model bundle: $model_bundle"
 
-        # Select model bundle based on technology
-        if [ "$tech" == "ONT" ]; then
-          model_bundle="${model_base_path}/DNAscopeONT2.1.bundle"
-        elif [ "$tech" == "HiFi" ]; then
-          model_bundle="${model_base_path}/DNAscopePacBio2.1.bundle"
+          # Copy reference file and input file to work directory
+          echo "Copying reference file and input file to work directory..."
+          ref_fasta_basename=$(basename "$ref_fasta")
+          alignment_file_basename=$(basename "$alignment_file")
+          start_time=$SECONDS
+          cp "$ref_fasta" ./"$ref_fasta_basename" || { echo "Failed to copy reference FASTA"; exit 1; }
+          cp "$ref_fasta".fai ./"$ref_fasta_basename".fai || { echo "Failed to copy reference FASTA index"; exit 1; }
+          cp "$alignment_file" ./"$alignment_file_basename" || { echo "Failed to copy input file"; exit 1; }
+          echo "Reference file and input file copied to $ref_fasta_basename and $alignment_file_basename in $((SECONDS - start_time)) seconds"
+
+          # Set read group information
+          read_group="@RG\tID:${sample_id}\tSM:${sample_id}\tPL:PACBIO"
+          
+          # Run the alignment
+          start_time=$SECONDS
+          
+          # Run minimap2 and pipe to sorting utility
+          # Check file extension and process accordingly
+          # Use output_bam basename for temporary file in workdir
+          output_bam_basename=$(basename "$output_bam")
+          if [[ "$alignment_file" == *.bam ]] || [[ "$alignment_file" == *.cram ]]; then
+            echo "Processing BAM/CRAM with FASTQ conversion"
+            { ( samtools fastq -@ $AGENT_CPU_CORES -T '*' "$alignment_file_basename" | \
+              sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
+              -x "${model_bundle}/minimap2.model" "$ref_fasta_basename" - || \
+              { echo "Minimap2 error"; false; } ) \
+              2>&3 | sentieon util sort -o "$output_bam_basename" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
+              3>&1 1>&2 || { echo "Alignment failed"; exit 1; }
+          else
+            echo "Processing FASTQ input directly"
+            { ( sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
+              -x "${model_bundle}/minimap2.model" "$ref_fasta_basename" "$alignment_file_basename" || \
+              { echo "Minimap2 error"; false; } ) \
+              2>&3 | sentieon util sort -o "$output_bam_basename" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
+              3>&1 1>&2 || { echo "Alignment failed"; exit 1; }
+          fi
+
+          duration=$((SECONDS - start_time))
+          
+          # Copy output files to output folder
+          cp "$output_bam_basename"* "$output_folder" || { echo "Failed to copy output files"; exit 1; }
+          
+          # Post-execution logging for Minimap2
+          MINIMAP2_END_TIME=$(date +%s)
+          MINIMAP2_DURATION=$((MINIMAP2_END_TIME - MINIMAP2_START_TIME))
+          MINIMAP2_DURATION_HOUR=$((MINIMAP2_DURATION / 3600))
+          MINIMAP2_DURATION_MIN=$(((MINIMAP2_DURATION % 3600) / 60))
+          MINIMAP2_DURATION_SEC=$((MINIMAP2_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ MINIMAP2 ALIGNMENT COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${MINIMAP2_DURATION_HOUR}h ${MINIMAP2_DURATION_MIN}m ${MINIMAP2_DURATION_SEC}s"
+          echo "📁 Output Files:"
+          if [ -f "$output_bam" ]; then
+            echo "  - $(basename "$output_bam") ($(format_file_size "$output_bam"))"
+          fi
+          if [ -f "$output_bam.bai" ]; then
+            echo "  - $(basename "$output_bam.bai") ($(format_file_size "$output_bam.bai"))"
+          fi
+          echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+          echo "================================================"
+
         else
-          echo "Invalid technology: $tech"
-          exit 1
-        fi
 
-        if [ ! -f "$model_bundle" ]; then
-          echo "Model bundle does not exist at $model_bundle. Please run the task Download Sentieon Models to download the models and then re-run this task"
-          exit 1
-        fi
-        echo "Using model bundle: $model_bundle"
+          # Process failed target uBAM; variation of normal alignment workflow
+          echo "================================================"
+          echo "🔧 PROCESSING FAILED TARGET REGIONS"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - Failed Target BAM: $(basename "$alignment_file")"
+          echo "================================================"
 
-        # Copy reference file and input file to work directory
-        echo "Copying reference file and input file to work directory..."
-        ref_fasta_basename=$(basename "$ref_fasta")
-        alignment_file_basename=$(basename "$alignment_file")
-        start_time=$SECONDS
-        cp "$ref_fasta" ./"$ref_fasta_basename" || { echo "Failed to copy reference FASTA"; exit 1; }
-        cp "$ref_fasta".fai ./"$ref_fasta_basename".fai || { echo "Failed to copy reference FASTA index"; exit 1; }
-        cp "$alignment_file" ./"$alignment_file_basename" || { echo "Failed to copy input file"; exit 1; }
-        echo "Reference file and input file copied to $ref_fasta_basename and $alignment_file_basename in $((SECONDS - start_time)) seconds"
+          # Extract reference file paths from the template
+          REF_FASTA="$PB_RESOURCES_DIR/GRCh38/human_GRCh38_no_alt_analysis_set.fasta"
+          REF_INDEX="$PB_RESOURCES_DIR/GRCh38/human_GRCh38_no_alt_analysis_set.fasta.fai"
 
-        # Set read group information
-        read_group="@RG\tID:${sample_id}\tSM:${sample_id}\tPL:PACBIO"
-        
-        # Run the alignment
-        start_time=$SECONDS
-        
-        # Run minimap2 and pipe to sorting utility
-        # Check file extension and process accordingly
-        # Use output_bam basename for temporary file in workdir
-        output_bam_basename=$(basename "$output_bam")
-        if [[ "$alignment_file" == *.bam ]] || [[ "$alignment_file" == *.cram ]]; then
-          echo "Processing BAM/CRAM with FASTQ conversion"
-          { ( samtools fastq -@ $AGENT_CPU_CORES -T '*' "$alignment_file_basename" | \
+          # Verify reference files exist
+          if [ ! -f "$REF_FASTA" ]; then
+            echo "Error: Reference FASTA file not found at $REF_FASTA"
+            echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+            exit 1
+          fi
+
+          if [ ! -f "$REF_INDEX" ]; then
+            echo "Error: Reference FASTA index file not found at $REF_INDEX"
+            echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+            exit 1
+          fi
+
+          # Copy reference files to /scratch
+          echo "Copying reference files to /scratch..."
+          cp "$REF_FASTA" /scratch/
+          cp "$REF_INDEX" /scratch/
+          LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
+          LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
+
+          # Set up TRGT BED file path
+          TRGT_BED="${PB_RESOURCES_DIR}/GRCh38/trgt/adotto_strchive_20250827.hg38.bed.gz"
+
+          # Verify TRGT BED file exists
+          if [ ! -f "$TRGT_BED" ]; then
+            echo "Error: TRGT BED file not found at $TRGT_BED"
+            echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+            exit 1
+          fi
+
+          # Copy TRGT BED to /scratch
+          echo "Copying TRGT BED to /scratch..."
+          cp "$TRGT_BED" /scratch/
+          LOCAL_TRGT_BED="/scratch/$(basename "$TRGT_BED")"
+
+          # Step 0: Process TRGT catalog to generate fail_reads resources
+          echo "================================================"
+          echo "🚀 STEP 0: Processing TRGT catalog for fail_reads resources"
+          echo "================================================"
+
+          # Create work directory for processing
+          PROCESS_TRGT_DIR="/scratch/process_trgt_step"
+          mkdir -p "$PROCESS_TRGT_DIR"
+          cd "$PROCESS_TRGT_DIR" || { echo "Failed to change to process_trgt_step directory"; exit 1; }
+
+          # Step 0a: Filter TRGT catalog (replicates filter_trgt_catalog task)
+          echo "Filtering TRGT catalog to identify INCLUDE_FAIL_READS regions..."
+          
+          # Decompress if gzipped, otherwise use as-is
+          if gzip --test "$LOCAL_TRGT_BED" 2>/dev/null; then
+            gunzip --stdout "$LOCAL_TRGT_BED" > in.bed
+            bed="./in.bed"
+          else
+            cp "$LOCAL_TRGT_BED" ./in.bed
+            bed="./in.bed"
+          fi
+
+          # Sanitize general TRGT repeat catalog to remove INCLUDE_FAIL_READS flag
+          sed 's/;INCLUDE_FAIL_READS//' "$bed" > trgt.bed
+
+          # Create a catalog with regions that have the INCLUDE_FAIL_READS flag and sanitize
+          grep 'INCLUDE_FAIL_READS' "$bed" 2>/dev/null | sed 's/;INCLUDE_FAIL_READS//' > include_fail_reads.trgt.bed || true
+
+          # Check if include_fail_reads_bed was created and has content
+          if [ ! -s include_fail_reads.trgt.bed ]; then
+            echo "No repeats in TRGT catalog contain INCLUDE_FAIL_READS flag. fail_reads will not be used for TRGT."
+            rm -f include_fail_reads.trgt.bed
+            FAIL_READS_BED=""
+          else
+            FAIL_READS_BED="$(pwd)/include_fail_reads.trgt.bed"
+          fi
+
+          # Step 0b: Subset reference if include_fail_reads_bed exists (replicates subset_reference task)
+          if [ -n "$FAIL_READS_BED" ] && [ -f "$FAIL_READS_BED" ]; then
+            echo "Creating reference FASTA subset from fail_reads regions..."
+            
+            SLOP_SIZE=10000
+            OUT_PREFIX="fail_reads_subset"
+            
+            # Use bedtools slop to extend regions, then format for samtools faidx
+            # Create a temporary region file
+            bedtools slop \
+              -b "$SLOP_SIZE" \
+              -g "$LOCAL_REF_INDEX" \
+              -i "$FAIL_READS_BED" \
+              | awk '{print $1":"$2"-"$3}' \
+              > regions.tmp || { echo "Failed to create regions file"; exit 1; }
+            
+            # Extract regions from reference using samtools faidx
+            samtools faidx \
+              --region-file regions.tmp \
+              "$LOCAL_REF_FASTA" \
+              > "${OUT_PREFIX}.fasta" || { echo "Failed to create reference subset"; exit 1; }
+            
+            # Clean up temporary file
+            rm -f regions.tmp
+            
+            # Index the subset FASTA
+            samtools faidx "${OUT_PREFIX}.fasta" || { echo "Failed to index reference subset"; exit 1; }
+            
+            FAIL_READS_BAIT_FASTA="$(pwd)/${OUT_PREFIX}.fasta"
+            FAIL_READS_BAIT_INDEX="$(pwd)/${OUT_PREFIX}.fasta.fai"
+          else
+            FAIL_READS_BAIT_FASTA=""
+            FAIL_READS_BAIT_INDEX=""
+          fi
+
+          cd /scratch || { echo "Failed to return to /scratch"; exit 1; }
+
+          # Verify all required files exist (they're optional outputs)
+          if [ -z "$FAIL_READS_BED" ] || [ "$FAIL_READS_BED" = "null" ] || [ ! -f "$FAIL_READS_BED" ]; then
+            echo "Warning: fail_reads_bed not generated by process_trgt_catalog."
+            echo "This means no repeats in the TRGT catalog contain INCLUDE_FAIL_READS flag."
+            echo "Cannot process failed target - skipping fail_reads processing."
+            exit 0
+          fi
+
+          if [ -z "$FAIL_READS_BAIT_FASTA" ] || [ "$FAIL_READS_BAIT_FASTA" = "null" ] || [ ! -f "$FAIL_READS_BAIT_FASTA" ]; then
+            echo "Error: fail_reads_bait_fasta not generated by process_trgt_catalog."
+            echo "Cannot process failed target."
+            exit 1
+          fi
+
+          if [ -z "$FAIL_READS_BAIT_INDEX" ] || [ "$FAIL_READS_BAIT_INDEX" = "null" ] || [ ! -f "$FAIL_READS_BAIT_INDEX" ]; then
+            echo "Error: fail_reads_bait_index not generated by process_trgt_catalog."
+            echo "Cannot process failed target."
+            exit 1
+          fi
+
+          echo "✅ All fail_reads resources generated from TRGT catalog:"
+          echo "  - fail_reads_bed: $(basename "$FAIL_READS_BED")"
+          echo "  - fail_reads_bait_fasta: $(basename "$FAIL_READS_BAIT_FASTA")"
+          echo "  - fail_reads_bait_index: $(basename "$FAIL_READS_BAIT_INDEX")"
+
+          # Copy fail_reads resources to /scratch (they may already be there from the workflow)
+          # Use absolute paths - files are already in workflow output directory
+          LOCAL_FAIL_READS_BED="$FAIL_READS_BED"
+          LOCAL_FAIL_READS_BAIT_FASTA="$FAIL_READS_BAIT_FASTA"
+          LOCAL_FAIL_READS_BAIT_INDEX="$FAIL_READS_BAIT_INDEX"
+
+          # Copy bait reference files to /scratch for local access
+          cp "$LOCAL_FAIL_READS_BAIT_FASTA" /scratch/
+          cp "$LOCAL_FAIL_READS_BAIT_INDEX" /scratch/
+          LOCAL_FAIL_READS_BAIT_FASTA="/scratch/$(basename "$LOCAL_FAIL_READS_BAIT_FASTA")"
+          LOCAL_FAIL_READS_BAIT_INDEX="/scratch/$(basename "$LOCAL_FAIL_READS_BAIT_INDEX")"
+
+          # Record start time
+          FAIL_TARGET_START_TIME=$(date +%s)
+
+          # Select model base path
+          if [ -z "$model_base_path" ]; then
+            echo "No model base path provided, using default model base path..."
+            model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+            if [ ! -d "$model_base_path" ]; then
+              echo "The default models do not exist at $model_base_path"
+              echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+              exit 1
+            fi
+          fi
+
+          # Select model bundle based on technology
+          if [ "$tech" == "ONT" ]; then
+            model_bundle="${model_base_path}/DNAscopeONT2.1.bundle"
+          elif [ "$tech" == "HiFi" ]; then
+            model_bundle="${model_base_path}/DNAscopePacBio2.1.bundle"
+          else
+            echo "Invalid technology: $tech"
+            exit 1
+          fi
+
+          if [ ! -f "$model_bundle" ]; then
+            echo "Model bundle does not exist at $model_bundle. Please run the task Download Sentieon Models to download the models and then re-run this task"
+            exit 1
+          fi
+          echo "Using model bundle: $model_bundle"
+
+          # Step 1: Bait fail reads to bait reference using Sentieon minimap2
+          echo "================================================"
+          echo "🚀 STEP 1/3: Baiting fail reads to bait reference"
+          echo "================================================"
+
+          # Copy input file to /scratch
+          alignment_file_basename=$(basename "$alignment_file")
+          cp "$alignment_file" /scratch/"$alignment_file_basename" || { echo "Failed to copy input file"; exit 1; }
+
+          # Set read group information
+          read_group="@RG\tID:${sample_id}\tSM:${sample_id}\tPL:PACBIO"
+
+          # Run Sentieon minimap2 alignment to bait reference
+          BAITED_BAM_BASENAME="${sample_id}.baited.bam"
+          echo "Running Sentieon minimap2 alignment to bait reference..."
+          
+          if [[ "$alignment_file" == *.bam ]] || [[ "$alignment_file" == *.cram ]]; then
+            echo "Processing BAM/CRAM with FASTQ conversion for baiting"
+            { ( samtools fastq -@ $AGENT_CPU_CORES -T '*' /scratch/"$alignment_file_basename" | \
+              sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
+              -x "${model_bundle}/minimap2.model" "$LOCAL_FAIL_READS_BAIT_FASTA" - || \
+              { echo "Minimap2 baiting error"; false; } ) \
+              2>&3 | sentieon util sort -o "$BAITED_BAM_BASENAME" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
+              3>&1 1>&2 || { echo "Baiting alignment failed"; exit 1; }
+          else
+            echo "Processing FASTQ input directly for baiting"
+            { ( sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
+              -x "${model_bundle}/minimap2.model" "$LOCAL_FAIL_READS_BAIT_FASTA" /scratch/"$alignment_file_basename" || \
+              { echo "Minimap2 baiting error"; false; } ) \
+              2>&3 | sentieon util sort -o "$BAITED_BAM_BASENAME" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
+              3>&1 1>&2 || { echo "Baiting alignment failed"; exit 1; }
+          fi
+
+          # Index the baited BAM
+          sentieon util index "$BAITED_BAM_BASENAME" || { echo "Failed to index baited BAM"; exit 1; }
+
+          BAITED_BAM="/scratch/$BAITED_BAM_BASENAME"
+          BAITED_BAM_INDEX="/scratch/${BAITED_BAM_BASENAME}.bai"
+
+          if [ ! -f "$BAITED_BAM" ]; then
+            echo "Error: Baited BAM file not found at $BAITED_BAM"
+            exit 1
+          fi
+
+          echo "✅ Step 1/3 completed: Baited BAM generated"
+
+          # Step 2: Align captured fail reads to main reference using Sentieon minimap2
+          echo "================================================"
+          echo "🚀 STEP 2/3: Aligning captured fail reads to main reference"
+          echo "================================================"
+
+          # Copy main reference to /scratch if not already there
+          LOCAL_REF_FASTA_BASENAME=$(basename "$LOCAL_REF_FASTA")
+          if [ ! -f "/scratch/$LOCAL_REF_FASTA_BASENAME" ]; then
+            cp "$LOCAL_REF_FASTA" /scratch/
+            cp "$LOCAL_REF_INDEX" /scratch/
+          fi
+
+          # Run Sentieon minimap2 alignment to main reference
+          ALIGNED_BAM_BASENAME="${sample_id}.aligned.bam"
+          echo "Running Sentieon minimap2 alignment to main reference..."
+          
+          echo "Processing baited BAM with FASTQ conversion for main alignment"
+          { ( samtools fastq -@ $AGENT_CPU_CORES -T '*' "$BAITED_BAM" | \
             sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
-            -x "${model_bundle}/minimap2.model" "$ref_fasta_basename" - || \
-            { echo "Minimap2 error"; false; } ) \
-            2>&3 | sentieon util sort -o "$output_bam_basename" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
-            3>&1 1>&2 || { echo "Alignment failed"; exit 1; }
-        else
-          echo "Processing FASTQ input directly"
-          { ( sentieon minimap2 -y -t $AGENT_CPU_CORES -a -Y -R "$read_group" \
-            -x "${model_bundle}/minimap2.model" "$ref_fasta_basename" "$alignment_file_basename" || \
-            { echo "Minimap2 error"; false; } ) \
-            2>&3 | sentieon util sort -o "$output_bam_basename" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
-            3>&1 1>&2 || { echo "Alignment failed"; exit 1; }
-        fi
+            -x "${model_bundle}/minimap2.model" "/scratch/$LOCAL_REF_FASTA_BASENAME" - || \
+            { echo "Minimap2 alignment error"; false; } ) \
+            2>&3 | sentieon util sort -o "$ALIGNED_BAM_BASENAME" -t $AGENT_CPU_CORES --sam2bam -i - ;} \
+            3>&1 1>&2 || { echo "Main alignment failed"; exit 1; }
 
-        duration=$((SECONDS - start_time))
-        
-        # Copy output files to output folder
-        cp "$output_bam_basename"* "$output_folder" || { echo "Failed to copy output files"; exit 1; }
-        
-        # Post-execution logging for Minimap2
-        MINIMAP2_END_TIME=$(date +%s)
-        MINIMAP2_DURATION=$((MINIMAP2_END_TIME - MINIMAP2_START_TIME))
-        MINIMAP2_DURATION_HOUR=$((MINIMAP2_DURATION / 3600))
-        MINIMAP2_DURATION_MIN=$(((MINIMAP2_DURATION % 3600) / 60))
-        MINIMAP2_DURATION_SEC=$((MINIMAP2_DURATION % 60))
-        
-        echo "================================================"
-        echo "✅ MINIMAP2 ALIGNMENT COMPLETED SUCCESSFULLY"
-        echo "================================================"
-        echo "⏱️  Execution Time: ${MINIMAP2_DURATION_HOUR}h ${MINIMAP2_DURATION_MIN}m ${MINIMAP2_DURATION_SEC}s"
-        echo "📁 Output Files:"
-        if [ -f "$output_bam" ]; then
-          echo "  - $(basename "$output_bam") ($(format_file_size "$output_bam"))"
+          # Index the aligned BAM
+          sentieon util index "$ALIGNED_BAM_BASENAME" || { echo "Failed to index aligned BAM"; exit 1; }
+
+          ALIGNED_BAM="/scratch/$ALIGNED_BAM_BASENAME"
+          ALIGNED_BAM_INDEX="/scratch/${ALIGNED_BAM_BASENAME}.bai"
+
+          if [ ! -f "$ALIGNED_BAM" ]; then
+            echo "Error: Aligned BAM file not found at $ALIGNED_BAM"
+            exit 1
+          fi
+
+          echo "✅ Step 2/3 completed: Aligned BAM generated"
+
+          # Step 3: Subset BAM to regions specified in fail_reads_bed
+          echo "================================================"
+          echo "🚀 STEP 3/3: Subsetting BAM to fail_reads regions"
+          echo "================================================"
+
+          OUT_PREFIX="${sample_id}.GRCh38.baited_fail_reads"
+          SLOP_SIZE=10000
+          SUBSET_BAM="/scratch/${OUT_PREFIX}.bam"
+          SUBSET_BAM_INDEX="/scratch/${OUT_PREFIX}.bam.bai"
+          
+          # Replicate subset_bam task: use bedtools slop and samtools view
+          echo "Subsetting BAM using bedtools slop and samtools view..."
+          
+          # Create slopped BED regions and use as targets for samtools view
+          # Create a temporary targets file
+          bedtools slop \
+            -b "$SLOP_SIZE" \
+            -g "$LOCAL_REF_INDEX" \
+            -i "$LOCAL_FAIL_READS_BED" \
+            > targets.tmp || { echo "Failed to create targets file"; exit 1; }
+          
+          # Subset BAM using samtools view
+          samtools view \
+            --threads $((AGENT_CPU_CORES > 1 ? AGENT_CPU_CORES - 1 : 1)) \
+            --targets-file targets.tmp \
+            --output "$SUBSET_BAM" \
+            "$ALIGNED_BAM" || { echo "Failed to subset BAM"; exit 1; }
+          
+          # Clean up temporary file
+          rm -f targets.tmp
+          
+          # Index the subset BAM
+          samtools index \
+            --threads $((AGENT_CPU_CORES > 1 ? AGENT_CPU_CORES - 1 : 1)) \
+            "$SUBSET_BAM" || { echo "Failed to index subset BAM"; exit 1; }
+
+          if [ ! -f "$SUBSET_BAM" ]; then
+            echo "Error: Subset BAM file not found at $SUBSET_BAM"
+            exit 1
+          fi
+
+          echo "✅ Step 3/3 completed: Subset BAM generated"
+
+          # Post-execution logging
+          FAIL_TARGET_END_TIME=$(date +%s)
+          FAIL_TARGET_DURATION=$((FAIL_TARGET_END_TIME - FAIL_TARGET_START_TIME))
+          FAIL_TARGET_DURATION_HOUR=$((FAIL_TARGET_DURATION / 3600))
+          FAIL_TARGET_DURATION_MIN=$(((FAIL_TARGET_DURATION % 3600) / 60))
+          FAIL_TARGET_DURATION_SEC=$((FAIL_TARGET_DURATION % 60))
+
+          echo "================================================"
+          echo "✅ FAILED TARGET PROCESSING COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${FAIL_TARGET_DURATION_HOUR}h ${FAIL_TARGET_DURATION_MIN}m ${FAIL_TARGET_DURATION_SEC}s"
+          echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+          echo "📁 Output Files:"
+          echo "  - Subset BAM: $(basename "$SUBSET_BAM")"
+          echo "  - Subset BAM Index: $(basename "$SUBSET_BAM_INDEX")"
+          echo "================================================"
+
+          # Copy subset BAM and index files to output folder using copy_with_progress
+          copy_with_progress "$output_folder" "$SUBSET_BAM" "$SUBSET_BAM_INDEX"
+
         fi
-        if [ -f "$output_bam.bai" ]; then
-          echo "  - $(basename "$output_bam.bai") ($(format_file_size "$output_bam.bai"))"
-        fi
-        echo "💾 Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
-        echo "================================================"
         
-        # Copy log file to output folder
-        cp -f "$logfile" "$output_folder"/ || { echo "Failed to copy log file"; exit 1; }
-        
-        cd "$TASK_DIR"

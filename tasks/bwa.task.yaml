@@ -111,6 +111,7 @@ steps:
     args:
       - |- # shell
         set -eu pipefail
+        env
 
         # Source shared utility functions
         source "${TASK_DIR}/utils/utils.sh"
