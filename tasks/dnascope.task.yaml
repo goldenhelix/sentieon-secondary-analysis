@@ -144,6 +144,9 @@ steps:
         fi
 
         echo "Selecting reference file..."
+        echo "WORKSPACE_DIR: $WORKSPACE_DIR"
+        echo "RESOURCES_PATH: $RESOURCES_PATH"
+        echo "REFERENCE_PATH: $REFERENCE_PATH"
         if [ -z "$ref_fasta" ]; then 
           echo "No reference file provided, using default reference file..."
           ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
@@ -175,14 +178,17 @@ steps:
           fi
         fi
 
-        echo "Selecting model base path..."
-        if [ -z "$model_base_path" ]; then
-          echo "No model base path provided, using default model base path..."
-          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
-          if [ ! -d "$model_base_path" ]; then
-            echo "The default model base path does not exist at $model_base_path"
-            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
-            exit 1
+        # Select model base path only when a model is selected (skip when model is None).
+        if [ "$ml_model" != "None" ]; then
+          echo "Selecting model base path..."
+          if [ -z "$model_base_path" ]; then
+            echo "No model base path provided, using default model base path..."
+            model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+            if [ ! -d "$model_base_path" ]; then
+              echo "The default model base path does not exist at $model_base_path"
+              echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+              exit 1
+            fi
           fi
         fi
 

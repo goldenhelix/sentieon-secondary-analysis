@@ -106,28 +106,22 @@ steps:
         cp "$input_file"* . || { echo "Failed to copy input files to workdir"; exit 1; }
         echo "Input files copied to workdir"
 
-        # Select model file
-        model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
-
-        echo "Selecting model file..."
-        case "$ml_model" in
-
-          "Illumina WGS 2.2")
-            model_path="${model_base_path}/SentieonIlluminaWGS2.2.bundle"
-            ;;
-
-          *)
-            model_path=""
-            ;;
-
-        esac
-
-        # Check that model file exists
-        if [ ! -f "$model_path" ]; then
+        # Select model file (only set/validate model base path when a model is selected).
+        if [ "$ml_model" = "Illumina WGS 2.2" ]; then
+          if [ -z "$model_base_path" ]; then
+            model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
+          fi
+          model_path="${model_base_path}/SentieonIlluminaWGS2.2.bundle"
+          if [ ! -f "$model_path" ]; then
             echo "The model file does not exist at $model_path"
             echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
             exit 1
+          fi
+        else
+          model_path=""
         fi
+
+        echo "Selecting model file..."
 
         echo "Sample name: $sample_name"
 

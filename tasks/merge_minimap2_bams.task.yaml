@@ -212,7 +212,7 @@ steps:
         export GOLDENHELIX_USERDATA=${WORKSPACE_DIR}/AppData
 
         cd "${input_folder}"
-        output_bam_path="${input_folder//${WORKSPACE_DIR}\//}/${sample_name}.minimap2.bam"
+        output_bam_path="${input_folder#${WORKSPACE_DIR}/}/${sample_name}.minimap2.bam"
         gautil client catalog-upsert SampleCatalog \
           Sample="$sample_name" \
           BAMPath="$output_bam_path" || \

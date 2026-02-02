@@ -110,8 +110,19 @@ steps:
       image: registry.goldenhelix.com/public/sentieon:202503.01
     args:
       - |- # shell
-        set -eu pipefail
+        set -euo pipefail
         env
+
+        # Capture workspace paths immediately. If the task runner pipes script output
+        # (e.g. script | tee log), the script runs in a subshell and env can be lost
+        # or differ between "phases". Stash these before any other code runs.
+        # Use plain assignment; ${VAR:-} can be misparsed by minimal /bin/sh as ${VAR}+":-}"
+        _WORKSPACE_DIR="$WORKSPACE_DIR"
+        _RESOURCES_PATH="$RESOURCES_PATH"
+        _REFERENCE_PATH="$REFERENCE_PATH"
+        export WORKSPACE_DIR="$_WORKSPACE_DIR"
+        export RESOURCES_PATH="$_RESOURCES_PATH"
+        export REFERENCE_PATH="$_REFERENCE_PATH"
 
         # Source shared utility functions
         source "${TASK_DIR}/utils/utils.sh"
@@ -135,26 +146,38 @@ steps:
         # Define metrics directory path
         metrics_dir="${output_folder}/${sample_name}_metrics"
 
-        # Select reference file
-        if [ -z "$ref_fasta" ]; then 
-          ref_fasta="$WORKSPACE_DIR/${RESOURCES_PATH}/${REFERENCE_PATH}"
-          if [ ! -f "$ref_fasta" ]; then
-            echo "The default reference file does not exist at $ref_fasta"
+        # Select reference file (use vars captured at top of script).
+        echo "Selecting reference file..."
+        echo "WORKSPACE_DIR: $_WORKSPACE_DIR"
+        echo "RESOURCES_PATH: $_RESOURCES_PATH"
+        echo "REFERENCE_PATH: $_REFERENCE_PATH"
+        default_ref_fasta="${_WORKSPACE_DIR}/${_RESOURCES_PATH}/${_REFERENCE_PATH}"
+        if [ -z "$ref_fasta" ]; then
+          echo "No reference file provided, using default reference file..."
+          ref_fasta="$default_ref_fasta"
+          echo "Using default reference file: ${ref_fasta}"
+          if [ ! -f "${ref_fasta}" ]; then
+            echo "The default reference file does not exist at ${ref_fasta}"
             echo "Please run the task Download Genomic Reference to download the reference and then re-run this task"
             exit 1
           fi
         fi
 
-        # Select model base path
-        if [ -z "$model_base_path" ]; then
-          model_base_path="$WORKSPACE_DIR/${RESOURCES_PATH}/sentieon_models"
-          if [ ! -d "$model_base_path" ]; then
-            echo "The default model base path does not exist at $model_base_path"
-            echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
-            exit 1
+        # Select model base path only when a model is selected (skip when model is None).
+        if [ "$ml_model" != "None" ]; then
+          default_model_base_path="${_WORKSPACE_DIR}/${_RESOURCES_PATH}/sentieon_models"
+          if [ -z "$model_base_path" ]; then
+            echo "No model base path provided, using default model base path..."
+            model_base_path="$default_model_base_path"
+            echo "Using default model base path: $model_base_path"
+            if [ ! -d "$model_base_path" ]; then
+              echo "The default model base path does not exist at $model_base_path"
+              echo "Please run the task Download Sentieon Models to download the models and then re-run this task"
+              exit 1
+            fi
           fi
         fi
-
+        
         # Select model file
         case "$ml_model" in
           "None")
@@ -915,9 +938,9 @@ steps:
           align_extension=".bam"
         fi
         if [[ $perform_dedup == true ]]; then
-          output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}_deduped${align_extension}"
+          output_bam_path="${output_folder#${WORKSPACE_DIR}/}/${sample_name}_deduped${align_extension}"
         else
-          output_bam_path="${output_folder//${WORKSPACE_DIR}\//}/${sample_name}_sorted${align_extension}"
+          output_bam_path="${output_folder#${WORKSPACE_DIR}/}/${sample_name}_sorted${align_extension}"
         fi
         cd "${WORKSPACE_DIR}"
         gautil client catalog-upsert SampleCatalog \
