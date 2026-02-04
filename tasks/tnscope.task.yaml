@@ -310,18 +310,21 @@ steps:
         echo "  - PCR Indel Model: $pcr_indel_model"
         echo "================================================"
 
-        if [[ ! $detect_sv == true ]]; then
-          disable_sv="--disable_detector sv"
+        if [ "$detect_sv" = true ]; then
+          disable_sv_args=""
+          sv_mask_ext_args="--sv_mask_ext $sv_mask_ext"
         else
-          disable_sv=""
+          disable_sv_args="--disable_detector sv"
+          sv_mask_ext_args=""
         fi
-        
+
         TNSCOPE_START_TIME=$(date +%s)
 
-        # Run TNscope variant calling
-        sentieon driver -t $num_threads -r "$local_ref_fasta" \
+        # Run TNscope variant calling (use if/else so paths with spaces are not word-split)
+        if [ -n "$input_normal" ]; then
+          sentieon driver -t $num_threads -r "$local_ref_fasta" \
             -i "$input_tumor" \
-            ${input_normal:+-i "$input_normal"} \
+            -i "$input_normal" \
             --temp_dir "$workdir" \
             --algo TNscope \
             --max_fisher_pv_active $max_fisher_pv_active \
@@ -341,11 +344,38 @@ steps:
             --prune_factor $prune_factor \
             --pcr_indel_model $pcr_indel_model \
             --min_base_qual $min_base_qual \
-            ${detect_sv:+--sv_mask_ext $sv_mask_ext} \
-            ${disable_sv} \
+            $sv_mask_ext_args \
+            $disable_sv_args \
             --tumor_sample "$tumor_sample_name" \
-            ${input_normal:+--normal_sample "$normal_sample_name"} \
+            --normal_sample "$normal_sample_name" \
             "$tumor_vcf" || { echo "TNscope variant calling failed"; exit 1; }
+        else
+          sentieon driver -t $num_threads -r "$local_ref_fasta" \
+            -i "$input_tumor" \
+            --temp_dir "$workdir" \
+            --algo TNscope \
+            --max_fisher_pv_active $max_fisher_pv_active \
+            --min_tumor_allele_frac $min_tumor_allele_frac \
+            --kmer_sizes $kmer_sizes \
+            --assemble_mode $assemble_mode \
+            --no_mapq_cap $no_mapq_cap \
+            --clip_by_minbq $clip_by_minbq \
+            --max_error_per_read $max_error_per_read \
+            --min_init_tumor_lod $min_init_tumor_lod \
+            --min_init_normal_lod $min_init_normal_lod \
+            --min_tumor_lod $min_tumor_lod \
+            --min_normal_lod $min_normal_lod \
+            --tumor_contamination_frac $tumor_contamination_frac \
+            --normal_contamination_frac $normal_contamination_frac \
+            --phasing $phasing \
+            --prune_factor $prune_factor \
+            --pcr_indel_model $pcr_indel_model \
+            --min_base_qual $min_base_qual \
+            $sv_mask_ext_args \
+            $disable_sv_args \
+            --tumor_sample "$tumor_sample_name" \
+            "$tumor_vcf" || { echo "TNscope variant calling failed"; exit 1; }
+        fi
 
         # Post-execution logging
         TNSCOPE_END_TIME=$(date +%s)

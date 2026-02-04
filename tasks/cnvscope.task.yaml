@@ -41,6 +41,14 @@ parameters:
     optional: true
     help: "The reference file (FASTA) to use for the CNV calling. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
 
+  - name: model_base_path
+    label: Sentieon Models Base Path
+    group: Advanced Options
+    type: directory
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "Optionally specify the Sentieon models base path. If not provided, the default models base path will be used. Note that the default models base path must be downloaded and set appropriately."
+
   - name: ml_model
     value: "Illumina WGS 2.2"
     label: Machine Learning Model

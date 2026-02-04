@@ -202,6 +202,13 @@ stages:
         stage: Alignment with BWA-MEM
         stage_parameter_expression: "${ref_fasta}"
 
+      - name: model_base_path
+        label: Sentieon Models Base Path
+        type: stage
+        stage: Alignment with BWA-MEM
+        stage_parameter_expression: "${model_base_path}"
+        optional: true
+
   - name: Short Tandem Repeat Analysis with ExpansionHunter
     description: Short tandem repeat analysis from an alignment file with ExpansionHunter
     task_path: tasks/expansionhunter.task.yaml
