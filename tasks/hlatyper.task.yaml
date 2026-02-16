@@ -1,0 +1,585 @@
+name: Precision HLA Typing with OptiType
+description: Precision HLA Typing with OptiType
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 8
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    optional: false
+
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+
+  - name: hla_fasta
+    label: HLA Reference FASTA
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "HLA reference FASTA file for subsetting reads. If not provided, defaults to hla_reference_dna.fasta in the resources directory."
+
+  - name: use_prefix
+    label: Use Sample Name as Prefix Filter
+    group: Advanced Options
+    type: boolean
+    value: "false"
+    help: "If enabled, only FASTQ files starting with the sample name will be processed. Enable this when the input folder contains FASTQ files from multiple samples. If disabled, all FASTQ files in the input folder are assumed to belong to this sample."
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: subset_fastqs
+    label: Subset FASTQs?
+    type: boolean
+    value: "true"
+    help: "Choose whether to subset FASTQ files to HLA reference. This will result in faster HLA processing time and is useful for replicating results."
+    group: Advanced Options
+
+steps:
+  - name: subset_reads
+    description: Subset reads to HLA FASTA
+    type: cmd
+    docker:
+      image: registry.goldenhelix.com/public/sentieon:202503.01
+    args: 
+      - |- # shell
+        set -eu pipefail
+
+        if [[ "$subset_fastqs" != "true" ]]; then
+          echo "Skipping subsetting of FASTQ files"
+          exit 0
+        fi
+
+        # Source shared utility functions
+        source "${TASK_DIR}/utils/utils.sh"
+
+        # License configuration
+        export SENTIEON_LICENSE="$GH_SERVER:8990"
+        licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
+
+        # Agent setup
+        bwt_mem=$((AGENT_MEMORY_GB - 2))
+        export bwt_max_mem="$bwt_mem"G
+
+        # Set up environment
+        cd /scratch
+
+        # Validate sample name doesn't contain whitespace
+        if [[ "$sample_name" =~ [[:space:]] ]]; then
+          echo "Error: Sample name should not contain whitespace"
+          exit 1
+        fi
+
+        # Search input directory for FASTQ files matching sample name
+        echo "Searching for FASTQ files in $input_folder..."
+        
+        # Auto-detect paired-end reads based on file naming
+        paired_end=false
+        while IFS= read -r file; do
+          # Remove the directory path
+          filename=$(basename "$file")
+          # Remove .fastq.gz or .fq.gz extension
+          if [[ "$filename" =~ \.fastq\.gz$ ]]; then
+            base_name="${filename%.fastq.gz}"
+          elif [[ "$filename" =~ \.fq\.gz$ ]]; then
+            base_name="${filename%.fq.gz}"
+          else
+            continue
+          fi
+          # Check if the base name contains _R1/_R2 (anywhere), ends with _1/_2, or ends with _f/_r
+          if [[ "$base_name" =~ _R1 ]] || [[ "$base_name" =~ _R2 ]] || [[ "$base_name" =~ (_1|_2)$ ]] || [[ "$base_name" =~ (_f|_r)$ ]]; then
+            paired_end=true
+            break
+          fi
+        done < <(if [[ "$use_prefix" == "true" ]]; then
+          find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+        else
+          find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+        fi)
+
+        echo "Paired-end mode detected: $paired_end"
+
+        # Validate and copy input files (FASTQs) and HLA FASTA
+        echo "Validating and copying input files..."
+        
+        # Determine HLA FASTA file (use provided or default)
+        if [ -n "$hla_fasta" ]; then
+          hla_fasta_path="$hla_fasta"
+        else
+          hla_fasta_path="${TASK_DIR}/../.resources/hla_reference_dna.fasta"
+          echo "No HLA FASTA specified, using default: $hla_fasta_path"
+        fi
+        
+        # Copy HLA FASTA to workdir
+        if [ ! -f "$hla_fasta_path" ]; then
+          echo "Error: HLA FASTA file not found: $hla_fasta_path"
+          exit 1
+        fi
+        cp "$hla_fasta_path" /scratch/ || { echo "Failed to copy HLA FASTA"; exit 1; }
+        hla_fasta_local="/scratch/$(basename "$hla_fasta_path")"
+        echo "Copied HLA FASTA: $hla_fasta_local"
+
+        # Find, validate, and copy FASTQ files
+        fastq_files=()
+        if [[ $paired_end == true ]]; then
+          while IFS= read -r file; do
+            # Detect which pattern is used (_R1/_R2, _1/_2, or _f/_r)
+            fastq_1=""
+            fastq_2=""
+            
+            if [[ "$file" =~ _R1 ]]; then
+              # Handle _R1/_R2 pattern (anywhere in filename)
+              fastq_1="$file"
+              fastq_2="${file/_R1/_R2}"
+            elif [[ "$file" =~ _1\.fastq\.gz$ ]] || [[ "$file" =~ _1\.fq\.gz$ ]]; then
+              # Handle _1/_2 pattern - only at the end of the filename (before extension)
+              fastq_1="$file"
+              if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                fastq_2="${file%_1.fastq.gz}_2.fastq.gz"
+              elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                fastq_2="${file%_1.fq.gz}_2.fq.gz"
+              fi
+            elif [[ "$file" =~ _f\.fastq\.gz$ ]] || [[ "$file" =~ _f\.fq\.gz$ ]]; then
+              # Handle _f/_r pattern - only at the end of the filename (before extension)
+              fastq_1="$file"
+              if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                fastq_2="${file%_f.fastq.gz}_r.fastq.gz"
+              elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                fastq_2="${file%_f.fq.gz}_r.fq.gz"
+              fi
+            fi
+
+            # Only process if we found a valid pattern match and both files exist
+            if [[ -n "$fastq_1" ]] && [[ -f "$fastq_1" ]] && [[ -f "$fastq_2" ]]; then
+              echo "Found paired-end FASTQ files:"
+              echo "  - $fastq_1"
+              echo "  - $fastq_2"
+              
+              # Copy files to /scratch
+              fastq_1_local="/scratch/$(basename "$fastq_1")"
+              fastq_2_local="/scratch/$(basename "$fastq_2")"
+              cp "$fastq_1" "$fastq_1_local" || { echo "Failed to copy $fastq_1"; exit 1; }
+              cp "$fastq_2" "$fastq_2_local" || { echo "Failed to copy $fastq_2"; exit 1; }
+              
+              fastq_files+=("$fastq_1_local" "$fastq_2_local")
+              echo "Copied to: $fastq_1_local, $fastq_2_local"
+            fi
+          done < <(if [[ "$use_prefix" == "true" ]]; then
+            find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+          else
+            find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+          fi)
+        else
+          while IFS= read -r file; do
+            echo "Found single-end FASTQ file: $file"
+            
+            # Validate FASTQ file before copying
+            echo "Validating FASTQ file: $file"
+            if ! zcat "$file" 2>/dev/null | awk 'NR%4==2{seq_len=length($0)} NR%4==0{qual_len=length($0); if(seq_len!=qual_len){print "ERROR: SEQ and QUAL length mismatch at line " NR-3 " (sequence length: " seq_len ", quality length: " qual_len ")"; exit 1}} END{if(NR%4!=0){print "ERROR: Invalid FASTQ format - file does not contain complete read records"; exit 1}}'; then
+              echo "ERROR: FASTQ file validation failed for $file"
+              echo "This error typically indicates corrupted or malformed FASTQ data"
+              exit 1
+            fi
+            
+            # Copy file to /scratch
+            fastq_local="/scratch/$(basename "$file")"
+            cp "$file" "$fastq_local" || { echo "Failed to copy $file"; exit 1; }
+            fastq_files+=("$fastq_local")
+            echo "Copied to: $fastq_local"
+          done < <(if [[ "$use_prefix" == "true" ]]; then
+            find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+          else
+            find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+          fi)
+        fi
+
+        if [ ${#fastq_files[@]} -eq 0 ]; then
+          echo "Error: No FASTQ files found matching criteria"
+          exit 1
+        fi
+
+        echo "Successfully processed ${#fastq_files[@]} FASTQ file(s)"
+
+        # Subset reads to HLA FASTA
+        echo "================================================"
+        echo "Subsetting reads to HLA FASTA"
+        echo "================================================"
+        
+        # Index HLA FASTA with Sentieon BWA if index doesn't exist
+        if [ ! -f "${hla_fasta_local}.amb" ]; then
+          echo "Indexing HLA FASTA with Sentieon BWA..."
+          sentieon bwa index "$hla_fasta_local" || { echo "Failed to index HLA FASTA"; exit 1; }
+        else
+          echo "HLA FASTA index already exists, skipping indexing"
+        fi
+        
+        # Ensure output directory exists
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+        
+        # Subset FASTQ files based on paired-end or single-end
+        subset_fastq_files=()
+        if [[ $paired_end == true ]]; then
+          # Process paired-end files in pairs
+          for ((i=0; i<${#fastq_files[@]}; i+=2)); do
+            fastq_1="${fastq_files[i]}"
+            fastq_2="${fastq_files[i+1]}"
+            
+            # Get base names for output files
+            base_1=$(basename "$fastq_1" .gz)
+            base_1="${base_1%.fastq}"
+            base_1="${base_1%.fq}"
+            base_2=$(basename "$fastq_2" .gz)
+            base_2="${base_2%.fastq}"
+            base_2="${base_2%.fq}"
+            
+            subset_fastq_1="/scratch/${base_1}_hla.fastq.gz"
+            subset_fastq_2="/scratch/${base_2}_hla.fastq.gz"
+            output_fastq_1="${output_folder}/$(basename "$subset_fastq_1")"
+            output_fastq_2="${output_folder}/$(basename "$subset_fastq_2")"
+            
+            # Check if output files already exist
+            if [[ -f "$output_fastq_1" ]] && [[ -f "$output_fastq_2" ]]; then
+              echo "Subset FASTQ files already exist, skipping subsetting:"
+              echo "  - $output_fastq_1"
+              echo "  - $output_fastq_2"
+              subset_fastq_files+=("$output_fastq_1" "$output_fastq_2")
+              echo "Skipping subsetting: $output_fastq_1, $output_fastq_2"
+              exit 0
+            fi
+            
+            subset_bam_1="/scratch/${base_1}_hla.bam"
+            subset_bam_2="/scratch/${base_2}_hla.bam"
+            
+            echo "Mapping $fastq_1 to HLA reference..."
+            sentieon bwa mem -t $AGENT_CPU_CORES "$hla_fasta_local" <(zcat "$fastq_1") | \
+              samtools view -bS -F 4 - > "$subset_bam_1" || { echo "Failed to map $fastq_1"; exit 1; }
+            
+            echo "Mapping $fastq_2 to HLA reference..."
+            sentieon bwa mem -t $AGENT_CPU_CORES "$hla_fasta_local" <(zcat "$fastq_2") | \
+              samtools view -bS -F 4 - > "$subset_bam_2" || { echo "Failed to map $fastq_2"; exit 1; }
+            
+            echo "Converting BAM to FASTQ for $fastq_1..."
+            if command -v pigz >/dev/null 2>&1; then
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam_1" | pigz -p $AGENT_CPU_CORES > "$subset_fastq_1" || { echo "Failed to convert $subset_bam_1"; exit 1; }
+            else
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam_1" | gzip > "$subset_fastq_1" || { echo "Failed to convert $subset_bam_1"; exit 1; }
+            fi
+            
+            echo "Converting BAM to FASTQ for $fastq_2..."
+            if command -v pigz >/dev/null 2>&1; then
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam_2" | pigz -p $AGENT_CPU_CORES > "$subset_fastq_2" || { echo "Failed to convert $subset_bam_2"; exit 1; }
+            else
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam_2" | gzip > "$subset_fastq_2" || { echo "Failed to convert $subset_bam_2"; exit 1; }
+            fi
+            
+            subset_fastq_files+=("$subset_fastq_1" "$subset_fastq_2")
+            
+            # Clean up intermediate BAM files
+            rm -f "$subset_bam_1" "$subset_bam_2"
+          done
+        else
+          # Process single-end files
+          for fastq_file in "${fastq_files[@]}"; do
+            base=$(basename "$fastq_file" .gz)
+            base="${base%.fastq}"
+            base="${base%.fq}"
+            
+            subset_fastq="/scratch/${base}_hla.fastq.gz"
+            output_fastq="${output_folder}/$(basename "$subset_fastq")"
+            
+            # Check if output file already exists
+            if [[ -f "$output_fastq" ]]; then
+              echo "Subset FASTQ file already exists, skipping subsetting: $output_fastq"
+              subset_fastq_files+=("$output_fastq")
+              echo "Skipping subsetting: $output_fastq"
+              exit 0
+            fi
+            
+            subset_bam="/scratch/${base}_hla.bam"
+            
+            echo "Mapping $fastq_file to HLA reference..."
+            sentieon bwa mem -t $AGENT_CPU_CORES "$hla_fasta_local" <(zcat "$fastq_file") | \
+              samtools view -bS -F 4 - > "$subset_bam" || { echo "Failed to map $fastq_file"; exit 1; }
+            
+            echo "Converting BAM to FASTQ..."
+            if command -v pigz >/dev/null 2>&1; then
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam" | pigz -p $AGENT_CPU_CORES > "$subset_fastq" || { echo "Failed to convert $subset_bam"; exit 1; }
+            else
+              samtools fastq -@ $AGENT_CPU_CORES "$subset_bam" | gzip > "$subset_fastq" || { echo "Failed to convert $subset_bam"; exit 1; }
+            fi
+            
+            subset_fastq_files+=("$subset_fastq")
+            
+            # Clean up intermediate BAM file
+            rm -f "$subset_bam"
+          done
+        fi
+        
+        echo "Successfully processed ${#subset_fastq_files[@]} FASTQ file(s) to HLA reference"
+
+        # Copy subset FASTQ to output directory (only if not already there)
+        echo "Copying subset FASTQ files to output directory..."
+        for subset_fastq in "${subset_fastq_files[@]}"; do
+          # Check if file is already in output directory
+          if [[ "$subset_fastq" == "$output_folder"* ]]; then
+            echo "File already in output directory: $subset_fastq"
+            continue
+          fi
+          cp "$subset_fastq" "$output_folder/" || { echo "Failed to copy $subset_fastq"; exit 1; }
+          echo "Copied $(basename "$subset_fastq") to $output_folder"
+        done
+
+        # Clean up
+        echo "Cleaning up temporary files..."
+        rm -f /scratch/*.fastq.gz /scratch/*.fq.gz /scratch/*.bam /scratch/*.bai
+        # Keep HLA FASTA and its index for potential reuse
+
+  - name: hlatyping
+    description: Run Precision HLA Typing with OptiType
+    type: cmd
+    docker:
+      image: fred2/optitype
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Set up environment
+        cd /scratch
+
+        # Copy FASTQs based on subset_fastqs option
+        echo "================================================"
+        echo "Finding and copying FASTQ files"
+        echo "================================================"
+        
+        fastq_files_to_process=()
+        
+        if [[ "$subset_fastqs" == "true" ]]; then
+          # Look for subsetted FASTQs in output_folder
+          echo "Looking for subsetted FASTQ files in $output_folder..."
+          
+          # Find subsetted FASTQ files (pattern: *_hla.fastq.gz)
+          # Apply use_prefix filter if enabled
+          if [[ "$use_prefix" == "true" ]]; then
+            echo "Using sample name prefix filter: ${sample_name}*"
+            subset_fastq_files=$(find "$output_folder" -maxdepth 1 -type f \( -name "${sample_name}*_hla.fastq.gz" -o -name "${sample_name}*_hla.fq.gz" \) | sort)
+          else
+            subset_fastq_files=$(find "$output_folder" -maxdepth 1 -type f \( -name "*_hla.fastq.gz" -o -name "*_hla.fq.gz" \) | sort)
+          fi
+          
+          if [ -z "$subset_fastq_files" ]; then
+            echo "Error: No subsetted FASTQ files found in $output_folder"
+            if [[ "$use_prefix" == "true" ]]; then
+              echo "Expected files matching pattern: ${sample_name}*_hla.fastq.gz or ${sample_name}*_hla.fq.gz"
+            else
+              echo "Expected files matching pattern: *_hla.fastq.gz or *_hla.fq.gz"
+            fi
+            exit 1
+          fi
+          
+          # Count files and determine if paired-end
+          file_count=$(echo "$subset_fastq_files" | wc -l)
+          echo "Found $file_count subsetted FASTQ file(s)"
+          
+          # Check if paired-end (even number of files suggests paired-end)
+          if [ $((file_count % 2)) -eq 0 ] && [ $file_count -gt 0 ]; then
+            # Likely paired-end - process in pairs
+            echo "Detected paired-end subsetted FASTQ files"
+            while IFS= read -r file; do
+              if [ -n "$file" ]; then
+                fastq_files_to_process+=("$file")
+              fi
+            done <<< "$subset_fastq_files"
+          else
+            # Single-end
+            echo "Detected single-end subsetted FASTQ files"
+            while IFS= read -r file; do
+              if [ -n "$file" ]; then
+                fastq_files_to_process+=("$file")
+              fi
+            done <<< "$subset_fastq_files"
+          fi
+        else
+          # Look for original FASTQs in input_folder (similar to first step)
+          echo "Looking for original FASTQ files in $input_folder..."
+          
+          # Auto-detect paired-end reads based on file naming
+          paired_end=false
+          while IFS= read -r file; do
+            filename=$(basename "$file")
+            if [[ "$filename" =~ \.fastq\.gz$ ]]; then
+              base_name="${filename%.fastq.gz}"
+            elif [[ "$filename" =~ \.fq\.gz$ ]]; then
+              base_name="${filename%.fq.gz}"
+            else
+              continue
+            fi
+            if [[ "$base_name" =~ _R1 ]] || [[ "$base_name" =~ _R2 ]] || [[ "$base_name" =~ (_1|_2)$ ]] || [[ "$base_name" =~ (_f|_r)$ ]]; then
+              paired_end=true
+              break
+            fi
+          done < <(if [[ "$use_prefix" == "true" ]]; then
+            find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+          else
+            find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+          fi)
+          
+          echo "Paired-end mode detected: $paired_end"
+          
+          # Find and collect FASTQ files
+          if [[ $paired_end == true ]]; then
+            while IFS= read -r file; do
+              fastq_1=""
+              fastq_2=""
+              
+              if [[ "$file" =~ _R1 ]]; then
+                fastq_1="$file"
+                fastq_2="${file/_R1/_R2}"
+              elif [[ "$file" =~ _1\.fastq\.gz$ ]] || [[ "$file" =~ _1\.fq\.gz$ ]]; then
+                fastq_1="$file"
+                if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                  fastq_2="${file%_1.fastq.gz}_2.fastq.gz"
+                elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                  fastq_2="${file%_1.fq.gz}_2.fq.gz"
+                fi
+              elif [[ "$file" =~ _f\.fastq\.gz$ ]] || [[ "$file" =~ _f\.fq\.gz$ ]]; then
+                fastq_1="$file"
+                if [[ "$file" =~ \.fastq\.gz$ ]]; then
+                  fastq_2="${file%_f.fastq.gz}_r.fastq.gz"
+                elif [[ "$file" =~ \.fq\.gz$ ]]; then
+                  fastq_2="${file%_f.fq.gz}_r.fq.gz"
+                fi
+              fi
+              
+              if [[ -n "$fastq_1" ]] && [[ -f "$fastq_1" ]] && [[ -f "$fastq_2" ]]; then
+                fastq_files_to_process+=("$fastq_1" "$fastq_2")
+              fi
+            done < <(if [[ "$use_prefix" == "true" ]]; then
+              find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+            else
+              find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+            fi)
+          else
+            while IFS= read -r file; do
+              fastq_files_to_process+=("$file")
+            done < <(if [[ "$use_prefix" == "true" ]]; then
+              find "$input_folder" -type f \( -name "${sample_name}*.fastq.gz" -o -name "${sample_name}*.fq.gz" \)
+            else
+              find "$input_folder" -type f \( -name "*.fastq.gz" -o -name "*.fq.gz" \)
+            fi)
+          fi
+        fi
+        
+        if [ ${#fastq_files_to_process[@]} -eq 0 ]; then
+          echo "Error: No FASTQ files found"
+          exit 1
+        fi
+        
+        # Copy FASTQ files to /scratch
+        echo "Copying ${#fastq_files_to_process[@]} FASTQ file(s) to /scratch..."
+        copied_fastq_files=()
+        for fastq_file in "${fastq_files_to_process[@]}"; do
+          if [ ! -f "$fastq_file" ]; then
+            echo "Error: FASTQ file not found: $fastq_file"
+            exit 1
+          fi
+          fastq_local="/scratch/$(basename "$fastq_file")"
+          cp "$fastq_file" "$fastq_local" || { echo "Failed to copy $fastq_file"; exit 1; }
+          copied_fastq_files+=("$fastq_local")
+          echo "Copied: $(basename "$fastq_file") -> $fastq_local"
+        done
+        
+        echo "Successfully copied ${#copied_fastq_files[@]} FASTQ file(s) to /scratch"
+
+        # Run OptiType
+
+        # Verify installation
+        python /usr/local/bin/OptiType/OptiTypePipeline.py -h > /dev/null 2>&1 || {
+          echo "Error: OptiType not installed correctly"
+          exit 1
+        }
+  
+        # Create config.ini file with appropriate thread settings
+        echo "Creating OptiType config.ini file..."
+        config_file="/scratch/config.ini"
+        {
+          echo "[mapping]"
+          echo "razers3=/usr/local/bin/razers3"
+          echo "threads=1"
+          echo ""
+          echo "[ilp]"
+          echo "solver=cbc"
+          echo "threads=$AGENT_CPU_CORES"
+          echo ""
+          echo "[behavior]"
+          echo "deletebam=true"
+          echo "unpaired_weight=0"
+          echo "use_discordant=false"
+          echo ""
+        } > "$config_file"
+        echo "Config file created at $config_file"
+        echo "  - Mapping threads: 1 (RazerS3 loads all reads into memory, so single-threaded to avoid OOM)"
+        echo "  - ILP solver threads: $AGENT_CPU_CORES"
+
+        # Run OptiType
+        echo "Running OptiType..."
+        echo "Input FASTQ files: ${copied_fastq_files[*]}"
+        echo "Number of input files: ${#copied_fastq_files[@]}"
+        
+        # Build OptiType command - handle single vs paired-end properly
+        optitype_cmd=(
+          python /usr/local/bin/OptiType/OptiTypePipeline.py
+          --input
+        )
+        
+        # Add all FASTQ files to the command
+        for fastq_file in "${copied_fastq_files[@]}"; do
+          optitype_cmd+=("$fastq_file")
+        done
+        
+        optitype_cmd+=(
+          --dna
+          --outdir /scratch/optitype_output
+          --prefix "$sample_name"
+          --verbose
+          --config "$config_file"
+        )
+        
+        # Execute OptiType
+        "${optitype_cmd[@]}" || { 
+          echo "OptiType failed with exit code $?"
+          echo "Note: If you see 'Killed' message, this may indicate memory issues."
+          echo "Consider enabling subset_fastqs option to reduce memory usage."
+          exit 1
+        }
+
+        echo "OptiType completed successfully"
+
+        # Process output
+
+        echo "Results: "
+        ls -la /scratch/optitype_output
+        cat /scratch/optitype_output/${sample_name}_result.tsv
+
+        # Clean up
+
+  - name: upload_results
+    description: Upload OptiType results to Sample Catalog
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # Set up environment
+
+        # Copy OptiType results 
+
+        # Parse results
+
+        # Upload results to Sample Catalog as PGx Genotypes

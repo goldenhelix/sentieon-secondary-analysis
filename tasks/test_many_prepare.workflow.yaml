@@ -1,0 +1,16 @@
+name: Test Many Calls
+description: Run prepare directories many times
+
+stages:
+  - name: Prepare Directories
+    description: Prepare output directories
+    task_path: prepare_directories.task.yaml
+    depends_on: []
+
+    batch_file_parameter:
+      label: Prepare Directories BAtch
+      path:
+        base_path:
+          type: directory
+        file: ''
+      help: "The batch file contain the prepare directory parameters"

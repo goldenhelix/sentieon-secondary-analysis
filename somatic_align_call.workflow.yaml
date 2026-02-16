@@ -90,7 +90,7 @@ stages:
         label: UMI Read Structure
         type: string
         optional: true
-        help: "The read structure of the UMI reads. This is used to determine the UMI length and the position of the UMI in the read. If not provided, UMI data will not be extracted."
+        help: "The read structure of the UMI reads (ex. 6M+T,6M+T for 6 base prefix on paired reads, see Sentieon manual for more details). If not provided, UMI data will not be extracted."
         
       - name: duplex_umi  
         label: Duplex UMI

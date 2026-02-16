@@ -1,0 +1,54 @@
+name: Dummy Alignment with BWA-MEM
+description: BWA Mem alignment on one or more FASTQ files for a single sample
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 16
+  memory_gb: 32
+
+alternative_agent_requirements:
+  Panels:
+    cpu_cores: 8
+    memory_gb: 16
+    description: Small FASTQ inputs for gene panels
+  Exomes:
+    cpu_cores: 16
+    memory_gb: 32
+    description: Medium FASTQ inputs for exomes, shallow genomes or large panels
+  Genomes:
+    cpu_cores: 32
+    memory_gb: 64
+    description: Large FASTQ inputs for high coverage genomes
+
+parameters:
+  - name: ref_fasta
+    label: Reference File (FASTA)
+    type: file
+    supports_location_mode: 'read_only'
+    optional: true
+    help: "Optionally specify the reference file to align to. If not provided, the default reference file will be used. Note that the default reference file must be downloaded and set appropriately."
+    
+  - name: ml_model
+    value: "None"
+    label: Machine Learning Model
+    type: enum
+    choices: [None, Element Biosciences WES 2.1, Element Biosciences WGS 2.1, Illumina WES 2.1, Illumina WGS 2.2,
+              MGI WES 2.1, MGI WGS 2.1, Salus WES 1.0, Salus WGS 1.0, 
+              Ultima Genomics WGS 1.1]
+    optional: false
+
+  - name: model_base_path
+    label: Sentieon Models Base Path
+    group: Advanced Options 
+    type: directory
+    supports_location_mode: 'read_only'
+    optional: true
+
+steps:
+  - name: bwa-mem
+    description: Run BWA-MEM
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+        echo "Nothing to do"
