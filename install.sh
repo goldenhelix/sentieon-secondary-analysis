@@ -10,7 +10,7 @@ mkdir -p "${WORKSPACE_DIR}/AppData/VarSeq/User Data/ProjectTemplates"
 
 cp -f ./.project_templates/*.vsproject-template "${WORKSPACE_DIR}/AppData/VarSeq/User Data/ProjectTemplates"
 
-git submodule update --init --recursive
+git submodule update --init --recursive 2>&1
 echo "Submodule update exit code: $?"
 
 echo "Submodule status:"
