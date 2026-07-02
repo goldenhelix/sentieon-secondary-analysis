@@ -166,6 +166,7 @@ stages:
   - name: CNV Calling with Sentieon CNVscope
     description: CNV calling from an alignment file with Sentieon's CNVscope algorithm
     task_path: tasks/cnvscope.task.yaml
+    run_step: optional_default_run
     depends_on:
       - Alignment with BWA-MEM
 
