@@ -95,6 +95,12 @@ stages:
         stage_parameter_expression: "true"
         help: "If enabled, only FASTQ files starting with the sample name will be processed. Enable this when the input folder contains FASTQ files from multiple samples. If disabled, all FASTQ files in the input folder are assumed to belong to this sample."
 
+      - name: output_metrics
+        label: Output Metrics
+        type: boolean
+        value: "false"
+        help: "If enabled, the alignment metrics will be output to a file."
+
   - name: Variant Calling with DNAscope 
     description: Variant calling from an alignment file with Sentieon's DNAscope algorithm
     task_path: tasks/dnascope.task.yaml
