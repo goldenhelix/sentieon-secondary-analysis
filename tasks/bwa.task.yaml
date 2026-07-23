@@ -136,9 +136,39 @@ steps:
         licsrvr=$(sentieon licclnt ping --server "$GH_SERVER:8990")
 
         # Agent setup
-        bwt_mem=$((AGENT_MEMORY_GB - 2))
         num_threads=$AGENT_CPU_CORES
-        export bwt_max_mem="$bwt_mem"G
+
+        # --- Memory budget & BWA ceiling -------------------------------------
+        # AGENT_MEMORY_GB is the scheduler's REQUESTED memory; the real hard
+        # limit is the container cgroup. Exceeding the cgroup limit => the kernel
+        # OOM-kills the container, the stats sidecar loses its handshake, and the
+        # run fails with a misleading "Failed to get container stats" error.
+        # Derive the ceiling from the smaller of the two and reserve headroom for
+        # the `sentieon util sort` that runs CONCURRENTLY in the same pipe (it is
+        # NOT bounded by bwt_max_mem), plus OS / Sentieon overhead. The old value
+        # (AGENT_MEMORY_GB - 2) left almost nothing for the concurrent sort.
+        cgroup_limit_gb=$(( $(mem_limit_bytes) / 1073741824 ))
+        mem_budget_gb=$AGENT_MEMORY_GB
+        if [ "$cgroup_limit_gb" -gt 0 ] && [ "$cgroup_limit_gb" -lt "$mem_budget_gb" ]; then
+          echo "⚠️  Container cgroup limit (${cgroup_limit_gb}G) < AGENT_MEMORY_GB (${AGENT_MEMORY_GB}G); using ${cgroup_limit_gb}G as the budget."
+          mem_budget_gb=$cgroup_limit_gb
+        fi
+        bwt_reserve_gb=$(( mem_budget_gb / 4 ))                      # reserve ~25% ...
+        if [ "$bwt_reserve_gb" -lt 4 ]; then bwt_reserve_gb=4; fi    # ... but at least 4G
+        bwt_mem=$(( mem_budget_gb - bwt_reserve_gb ))
+        if [ "$bwt_mem" -lt 1 ]; then bwt_mem=1; fi
+        export bwt_max_mem="${bwt_mem}G"
+
+        # Baseline OOM-kill counter so we can detect kills that happen in THIS run.
+        _oom_baseline=$(oom_kills)
+
+        echo "🧮 Resource budget:"
+        echo "   - AGENT_CPU_CORES : ${AGENT_CPU_CORES}"
+        echo "   - AGENT_MEMORY_GB : ${AGENT_MEMORY_GB}"
+        echo "   - cgroup limit    : ${cgroup_limit_gb}G (0 = unlimited/unknown)"
+        echo "   - memory budget   : ${mem_budget_gb}G"
+        echo "   - bwt_max_mem     : ${bwt_max_mem} (reserved ${bwt_reserve_gb}G for util sort / overhead)"
+        # ---------------------------------------------------------------------
 
         # Validate sample name
         pattern=" | "
@@ -322,6 +352,14 @@ steps:
         # Record start time
         BWA_START_TIME=$(date +%s)
 
+        # Start an independent memory recorder. The VSW3 container-stats sidecar
+        # can drop its handshake exactly when the container is under memory
+        # pressure, so we log our own timeline into the task log (which streams
+        # regardless). Cleaned up on any exit.
+        trap 'mem_monitor_stop' EXIT
+        mem_monitor_start 10
+        mem_report "pre-alignment"
+
         bam_input=""
         if [[ $paired_end == true ]]; then
           while IFS= read -r file; do
@@ -381,7 +419,7 @@ steps:
                       || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
                     2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                       3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                      { echo "BWA-MEM failed"; exit 1; }
+                      { rc=$?; echo "❌ BWA-MEM pipeline failed (pipeline exit $rc)"; mem_report "at-bwa-failure"; if [ "$(oom_kills)" -gt "${_oom_baseline:-0}" ]; then echo "🔴 cgroup OOM-kill detected during alignment — the container exceeded its memory limit (bump the tier or lower thread count / bwt_max_mem)"; fi; exit 1; }
                 else
                   { (sentieon umi extract $umi_read_structure "$fastq_1" "$fastq_2" || \
                       { echo -n "UMI extract error"; false; }) | \
@@ -394,7 +432,7 @@ steps:
                       || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
                     2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                       3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                      { echo "BWA-MEM failed"; exit 1; }
+                      { rc=$?; echo "❌ BWA-MEM pipeline failed (pipeline exit $rc)"; mem_report "at-bwa-failure"; if [ "$(oom_kills)" -gt "${_oom_baseline:-0}" ]; then echo "🔴 cgroup OOM-kill detected during alignment — the container exceeded its memory limit (bump the tier or lower thread count / bwt_max_mem)"; fi; exit 1; }
                 fi
                 duration=$((SECONDS - start_time))
                 file_size=$(stat -c%s "${sample_lane}${align_extension}")
@@ -454,7 +492,7 @@ steps:
                 || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
                 2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                 3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                { echo "BWA-MEM failed"; exit 1; }
+                { rc=$?; echo "❌ BWA-MEM pipeline failed (pipeline exit $rc)"; mem_report "at-bwa-failure"; if [ "$(oom_kills)" -gt "${_oom_baseline:-0}" ]; then echo "🔴 cgroup OOM-kill detected during alignment — the container exceeded its memory limit (bump the tier or lower thread count / bwt_max_mem)"; fi; exit 1; }
             else
               { (sentieon umi extract $umi_read_structure "$file" || \
                   { echo -n "UMI extract error"; false; }) | \
@@ -466,7 +504,7 @@ steps:
                   || { echo "ERROR: BWA-MEM alignment failed for $file"; false; }) \
                 2>&3 | sentieon util sort -r "$ref_fasta_local" -o "${sample_lane}${align_extension}" -t $num_threads --sam2bam -i - ;} \
                 3>&1 1>&2 | grep -v --line-buffered "^\[M::mem_pestat" | grep -v --line-buffered "^\[M::process" | grep -v --line-buffered "^\[M::mem_process" || \
-                { echo "BWA-MEM failed"; exit 1; }
+                { rc=$?; echo "❌ BWA-MEM pipeline failed (pipeline exit $rc)"; mem_report "at-bwa-failure"; if [ "$(oom_kills)" -gt "${_oom_baseline:-0}" ]; then echo "🔴 cgroup OOM-kill detected during alignment — the container exceeded its memory limit (bump the tier or lower thread count / bwt_max_mem)"; fi; exit 1; }
             fi
             duration=$((SECONDS - start_time))
             file_size=$(stat -c%s "${sample_lane}${align_extension}")
@@ -496,6 +534,7 @@ steps:
         echo "✅ BWA-MEM ALIGNMENT COMPLETED SUCCESSFULLY"
         echo "================================================"
         echo "⏱️  Execution Time: ${BWA_DURATION_HOUR}h ${BWA_DURATION_MIN}m ${BWA_DURATION_SEC}s"
+        mem_report "post-alignment"
         
         # Calculate total output size
         BWA_TOTAL_SIZE=0
@@ -925,6 +964,8 @@ steps:
         fi
         echo "  - Log File: ${sample_name}_bwa_run.log"
         echo "💾 **Final Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        mem_report "final"
+        mem_monitor_stop
         echo "================================================"
 
   - name: update_sample_catalog
