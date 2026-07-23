@@ -19,6 +19,10 @@ alternative_agent_requirements:
     cpu_cores: 32
     memory_gb: 64
     description: Large FASTQ inputs for high coverage genomes
+  Genomes (Extra Large):
+    cpu_cores: 64
+    memory_gb: 128
+    description: Very large FASTQ inputs for ultra-high coverage genomes
 
 parameters:
   - name: sample_name

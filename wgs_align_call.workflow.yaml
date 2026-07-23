@@ -6,7 +6,9 @@ selected_requirements_configuration: Genomes
 requirements_configurations:
   - name: Genomes
     description: Large FASTQ inputs for high coverage whole genomes
-    
+  - name: Genomes (Extra Large)
+    description: Very large FASTQ inputs for ultra-high coverage whole genomes
+
 stages:
   - name: Prepare Directories
     description: Prepare output directories

@@ -9,6 +9,8 @@ requirements_configurations:
     description: Medium FASTQ inputs for exomes, shallow genomes or large panels
   - name: Genomes
     description: Large FASTQ inputs for high coverage whole genomes
+  - name: Genomes (Extra Large)
+    description: Very large FASTQ inputs for ultra-high coverage whole genomes
 
 stages:
   - name: Prepare Directories
@@ -85,6 +87,12 @@ stages:
         label: Perform Deduplication (De-Select for Amplicon Data)
         type: boolean
         value: "true"
+
+      - name: output_metrics
+        label: Output Metrics
+        type: boolean
+        value: "false"
+        help: "If enabled, the alignment metrics will be output to a file."
 
       - name: umi_read_structure
         label: UMI Read Structure
