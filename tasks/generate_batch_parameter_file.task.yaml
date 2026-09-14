@@ -29,7 +29,12 @@ steps:
       - |- # shell
         set -eu pipefail
 
-        cd /scratch
+        # /scratch is not writable on every agent: the localhost agents create the
+        # per-run scratch dir root-owned 0755, researchserver24 0775 (verified runs
+        # 4437 / 4447). Prefer /scratch when usable, else a private temp dir --
+        # mktemp honours TMPDIR and falls back to the container-local /tmp.
+        work_dir="$(mktemp -d -p /scratch 2>/dev/null || mktemp -d)"
+        cd "$work_dir"
 
         # Create output file
         if [ "$sample_type" == "Family" ]; then
