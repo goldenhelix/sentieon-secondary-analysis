@@ -1,0 +1,27 @@
+{
+  "name": "somatic_e2e_vspipeline",
+  "description": "somatic_align_call end-to-end through VSPipeline using the Sentieon Somatic GRCh38 project template. Verifies that the clinical-variant set is retained in the final TNscope output.",
+  "workflow_path": "Sentieon Secondary Analysis/somatic_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/somatic/HiSeq 2000 Tumor Normal Subset",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "somatic_e2e_vspipeline",
+    "Generate VSBatch File for VSPipeline.vsproject_template": "AppData/VarSeq/User Data/ProjectTemplates/Sentieon Somatic Template GRCh38.vsproject-template"
+  },
+  "include": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/somatic_e2e_vspipeline",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz",
+    "**/*.vsbatch",
+    "**/*.vsproject"
+  ],
+  "expected_clinical_variants": {
+    "_TODO": "populate with known somatic variants from the HCC1187 cell line that the workflow should retain; needs one-time curation from a baseline successful e2e run",
+    "vcf_glob": "**/*.vcf.gz",
+    "variants": []
+  }
+}

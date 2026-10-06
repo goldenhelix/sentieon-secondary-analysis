@@ -1,0 +1,26 @@
+{
+  "name": "wgs_bam_output",
+  "description": "wgs_align_call with cram=false: produces BAM alignments instead of CRAM. All other stages run as default.",
+  "workflow_path": "Sentieon Secondary Analysis/wgs_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/test/sentieon-fixtures/NA19143-wgs",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "wgs_bam_output",
+    "Alignment with BWA-MEM.cram": "false"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline",
+    "Run VarSeq Reports"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/wgs_bam_output",
+  "expected_outputs": [
+    "**/*_deduped.bam",
+    "**/*_dnascope.vcf.gz",
+    "**/*_cnvscope.vcf.gz",
+    "**/*_sv.vcf.gz",
+    "**/*_ehunter.vcf.gz",
+    "**/*_gangstr.vcf.gz",
+    "**/*_cypcall.json"
+  ]
+}

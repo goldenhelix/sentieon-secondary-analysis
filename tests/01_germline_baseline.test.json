@@ -1,0 +1,19 @@
+{
+  "name": "germline_baseline",
+  "description": "germline_align_call — default analysis params (ml_model=None, no gVCF), Illumina paired-end FASTQ. Explicitly skips VSPipeline stages (the YAML's `run_step: optional_default_skip` is not being honored at runtime, so we bypass via --skip).",
+  "workflow_path": "Sentieon Secondary Analysis/germline_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/germline/paired_end_with_1_2",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "germline_baseline"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/germline_baseline",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz"
+  ]
+}

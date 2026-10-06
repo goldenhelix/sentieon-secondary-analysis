@@ -1,0 +1,26 @@
+{
+  "name": "wgs_baseline",
+  "description": "wgs_align_call defaults on NA19143 trio-subset WGS (gzipped fixture). Exercises BWA-MEM + DNAscope + CNVscope + ExpansionHunter + GangSTR + CypCall. CRAM output, SV calling on. VSPipeline stages skipped.",
+  "workflow_path": "Sentieon Secondary Analysis/wgs_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/test/sentieon-fixtures/NA19143-wgs",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "wgs_baseline"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline",
+    "Run VarSeq Reports"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/wgs_baseline",
+  "expected_outputs": [
+    "**/*_deduped.cram",
+    "**/*_dnascope.vcf.gz",
+    "**/*_cnvscope.vcf.gz",
+    "**/*_sv.vcf.gz",
+    "**/*_ehunter.vcf.gz",
+    "**/*_gangstr.vcf.gz",
+    "**/*_cypcall.json",
+    "**/*.segdup.*.vcf.gz"
+  ]
+}

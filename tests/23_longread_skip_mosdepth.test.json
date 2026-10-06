@@ -1,0 +1,21 @@
+{
+  "name": "longread_skip_mosdepth",
+  "description": "sentieon_long_read_cli with skip_mosdepth=true: skips coverage QC. Variant outputs still produced.",
+  "workflow_path": "Sentieon Secondary Analysis/sentieon_long_read_cli",
+  "params": {
+    "Prepare Directories.input_tsv": "devdata/vsw workflows data/germline/PacBioHG002_CSS15kb/single_alignment_pacbio.tsv",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "longread_skip_mosdepth",
+    "Variant Calling with Sentieon CLI.skip_mosdepth": "true"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/longread_skip_mosdepth",
+  "expected_outputs": [
+    "**/*.minimap2.bam",
+    "**/*.vcf.gz",
+    "**/*.g.vcf.gz"
+  ]
+}

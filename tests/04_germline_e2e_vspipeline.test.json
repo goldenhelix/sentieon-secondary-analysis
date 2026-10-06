@@ -1,0 +1,27 @@
+{
+  "name": "germline_e2e_vspipeline",
+  "description": "germline_align_call end-to-end through VSPipeline: includes the optional VSBatch + VarSeq Project stages, then checks the small-variant VCF for retained clinical variants. Uses the Sentieon Targeted Germline GRCh38 project template.",
+  "workflow_path": "Sentieon Secondary Analysis/germline_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/germline/paired_end_with_1_2",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "germline_e2e_vspipeline",
+    "Generate VSBatch File for VSPipeline.vsproject_template": "AppData/VarSeq/User Data/ProjectTemplates/Sentieon Targeted Germline Template GRCh38.vsproject-template"
+  },
+  "include": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/germline_e2e_vspipeline",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz",
+    "**/*.vsbatch",
+    "**/*.vsproject"
+  ],
+  "expected_clinical_variants": {
+    "_TODO": "populate with a small set of known clinically relevant variants known to be present in the HIS0052 sample's small-variant calls; needs one-time curation from a baseline successful run",
+    "vcf_glob": "**/*.vcf.gz",
+    "variants": []
+  }
+}

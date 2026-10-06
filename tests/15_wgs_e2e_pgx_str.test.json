@@ -1,0 +1,30 @@
+{
+  "name": "wgs_e2e_pgx_str",
+  "description": "wgs_align_call end-to-end through VSPipeline including the Run VarSeq Reports stage with VSPGx and STR reports enabled. Verifies the full clinical pipeline + checks clinical-variant retention.",
+  "workflow_path": "Sentieon Secondary Analysis/wgs_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/test/sentieon-fixtures/NA19143-wgs",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "wgs_e2e_pgx_str",
+    "Run VarSeq Reports.run_vspgx_report": "true",
+    "Run VarSeq Reports.run_str_report": "true"
+  },
+  "include": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline",
+    "Run VarSeq Reports"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/wgs_e2e_pgx_str",
+  "expected_outputs": [
+    "**/*.cram",
+    "**/*.vcf.gz",
+    "**/*_cnv.vcf.gz",
+    "**/*_sv.vcf.gz",
+    "**/*.vsproject"
+  ],
+  "expected_clinical_variants": {
+    "_TODO": "populate with PGx variants known to be present in NA19143 (Yoruban sample); also a few STR/CYP2D6 calls. Needs one-time curation from a baseline successful e2e run.",
+    "vcf_glob": "**/*.vcf.gz",
+    "variants": []
+  }
+}

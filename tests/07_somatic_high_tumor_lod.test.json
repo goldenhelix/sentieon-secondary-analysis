@@ -1,0 +1,21 @@
+{
+  "name": "somatic_high_tumor_lod",
+  "description": "somatic_align_call with min_init_tumor_lod=3 (the conservative value Sentieon recommends for UMI data / fewer somatic calls). Same HiSeq T-N subset; tests that the TNscope LOD param wires through.",
+  "workflow_path": "Sentieon Secondary Analysis/somatic_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/somatic/HiSeq 2000 Tumor Normal Subset",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "somatic_high_tumor_lod",
+    "Variant Calling with TNscope.min_init_tumor_lod": "3"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/somatic_high_tumor_lod",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz",
+    "**/batch_parameters.csv"
+  ]
+}

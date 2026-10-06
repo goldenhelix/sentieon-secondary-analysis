@@ -1,0 +1,2 @@
+alignment_file	sample_id	failed_target
+devdata/vsw workflows data/germline/long_read/ONT/wf-human-variation-demo/demo.bam	demo	false

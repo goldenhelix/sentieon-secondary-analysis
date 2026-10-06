@@ -1,0 +1,20 @@
+{
+  "name": "somatic_baseline",
+  "description": "somatic_align_call defaults on HiSeq Tumor-Normal Subset (HCC1187 / HCC2218 pairs). Mode (tumor-only vs T-N paired) depends on SampleCatalog state — the test exercises whichever mode the catalog allows.",
+  "workflow_path": "Sentieon Secondary Analysis/somatic_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/somatic/HiSeq 2000 Tumor Normal Subset",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "somatic_baseline"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/somatic_baseline",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz",
+    "**/batch_parameters.csv"
+  ]
+}

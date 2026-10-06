@@ -1,0 +1,25 @@
+{
+  "name": "wgs_no_sv",
+  "description": "wgs_align_call with call_svs=false. Small variants + CNVs + STRs still produced, no SV VCF.",
+  "workflow_path": "Sentieon Secondary Analysis/wgs_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/test/sentieon-fixtures/NA19143-wgs",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "wgs_no_sv",
+    "Variant Calling with DNAscope.call_svs": "false"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline",
+    "Run VarSeq Reports"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/wgs_no_sv",
+  "expected_outputs": [
+    "**/*_deduped.cram",
+    "**/*_dnascope.vcf.gz",
+    "**/*_cnvscope.vcf.gz",
+    "**/*_ehunter.vcf.gz",
+    "**/*_gangstr.vcf.gz",
+    "**/*_cypcall.json"
+  ]
+}

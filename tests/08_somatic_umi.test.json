@@ -1,0 +1,22 @@
+{
+  "name": "somatic_umi",
+  "description": "somatic_align_call with UMI extraction enabled on the Element_Panel_UMI_Subset (Element Biosciences Aviti panel). Exercises the umi_read_structure + duplex_umi params.",
+  "workflow_path": "Sentieon Secondary Analysis/somatic_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/somatic/Element_Panel_UMI_Subset",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "somatic_umi",
+    "Alignment with BWA-MEM.umi_read_structure": "8M+T,8M+T",
+    "Alignment with BWA-MEM.duplex_umi": "false"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/somatic_umi",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz",
+    "**/batch_parameters.csv"
+  ]
+}

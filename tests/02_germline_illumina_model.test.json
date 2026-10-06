@@ -1,0 +1,20 @@
+{
+  "name": "germline_illumina_model",
+  "description": "germline_align_call with ml_model=Illumina WES 2.1 (flipped from baseline's None).",
+  "workflow_path": "Sentieon Secondary Analysis/germline_align_call",
+  "params": {
+    "Prepare Directories.input_folder": "devdata/vsw workflows data/germline/paired_end_with_1_2",
+    "Prepare Directories.base_output_folder": "devdata/vsw workflows data/test/sentieon-secondary-analysis",
+    "Prepare Directories.folder_name": "germline_illumina_model",
+    "Alignment with BWA-MEM.ml_model": "Illumina WES 2.1"
+  },
+  "skip": [
+    "Generate VSBatch File for VSPipeline",
+    "Create VarSeq Project with VSPipeline"
+  ],
+  "output_folder": "/opt/ghdata/share/devdata/vsw workflows data/test/sentieon-secondary-analysis/germline_illumina_model",
+  "expected_outputs": [
+    "**/*.bam",
+    "**/*.vcf.gz"
+  ]
+}
