@@ -269,7 +269,7 @@ steps:
         cp "$input_tumor" . || { echo "Failed to copy tumor files to workdir"; exit 1; }
         cp "$input_tumor".bai . || { echo "Failed to copy tumor files to workdir"; exit 1; }
         input_tumor=$(basename "$input_tumor")
-        if [ $tumor_only = false ]; then
+        if [ "$tumor_only" = false ]; then
             cp "$input_normal" . || { echo "Failed to copy normal files to workdir"; exit 1; }
             cp "$input_normal".bai . || { echo "Failed to copy normal files to workdir"; exit 1; }  
             input_normal=$(basename "$input_normal")
@@ -289,7 +289,7 @@ steps:
 
         # Print info
         echo "================================================"
-        if [ $tumor_only = false ]; then
+        if [ "$tumor_only" = false ]; then
             echo "🚀 STARTING TNSCOPE VARIANT CALLING (TUMOR-NORMAL MODE)"
         else
             echo "🚀 STARTING TNSCOPE VARIANT CALLING (TUMOR-ONLY MODE)"
@@ -299,7 +299,7 @@ steps:
         echo "📁 Input Files:"
         echo "  - Tumor Sample: $tumor_sample_name"
         echo "  - Tumor File: $input_tumor ($(format_file_size "$input_tumor"))"
-        if [ $tumor_only = false ]; then
+        if [ "$tumor_only" = false ]; then
             echo "  - Normal Sample: $normal_sample_name"
             echo "  - Normal File: $input_normal ($(format_file_size "$input_normal"))"
         fi
@@ -313,7 +313,7 @@ steps:
         echo "  - Detect SV: $detect_sv"
         echo "  - Min Tumor LOD (Initial): $min_init_tumor_lod"
         echo "  - Min Tumor LOD (Final): $min_tumor_lod"
-        if [ $tumor_only = false ]; then
+        if [ "$tumor_only" = false ]; then
             echo "  - Min Normal LOD (Initial): $min_init_normal_lod"
             echo "  - Min Normal LOD (Final): $min_normal_lod"
         fi
@@ -428,4 +428,4 @@ steps:
           echo "The JSON file can be updated manually or via a separate task"
         fi
         
-        cp -f ${tumor_sample_name}_tnscope_run.log "$output_folder"/
+        cp -f "${tumor_sample_name}_tnscope_run.log" "$output_folder"/

@@ -268,7 +268,7 @@ steps:
           consensus_arg="--consensus --umi_tag XR"
         fi
 
-        if [ $umi == true ] && [ $duplex_umi == true ]; then
+        if [ "$umi" == true ] && [ "$duplex_umi" == true ]; then
           umi_read_structure="-d $umi_read_structure"
         fi
 
@@ -340,7 +340,7 @@ steps:
         echo "  - Threads: $num_threads"
         echo "  - Memory: ${AGENT_MEMORY_GB} GB"
         echo "  - Paired-End: $paired_end (detected automatically)"
-        if [ $umi == true ]; then
+        if [ "$umi" == true ]; then
           echo "  - UMI: $umi_read_structure"
           perform_dedup=true
           output_metrics=true
@@ -410,7 +410,7 @@ steps:
                   read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
                 fi
                 start_time=$SECONDS
-                if [ $umi == false ]; then 
+                if [ "$umi" == false ]; then 
                   { (sentieon bwa mem \
                       -R "$read_groups" \
                       ${model_path:+-x "${model_path}"/bwa.model} \
@@ -483,7 +483,7 @@ steps:
               read_groups="@RG\tID:${sample_lane}\tSM:$sample_name\tPL:$platform"
             fi
             start_time=$SECONDS
-            if [ $umi == false ]; then
+            if [ "$umi" == false ]; then
               { (sentieon bwa mem \
                 -M -R "$read_groups" \
                 ${model_path:+-x "${model_path}"/bwa.model} \
@@ -563,7 +563,7 @@ steps:
         echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
         echo "================================================"
 
-        if [ $output_metrics == true ]; then
+        if [ "$output_metrics" == true ]; then
           
           # Metrics Collection Step
           echo "================================================"
@@ -586,7 +586,7 @@ steps:
           metrics_dir_local="metrics"
           mkdir -p "$metrics_dir_local" || { echo "Failed to create local metrics directory"; exit 1; }
 
-          if [ $perform_dedup == true ]; then
+          if [ "$perform_dedup" == true ]; then
             # When both metrics and dedup are needed, combine the operations
             echo "Running metrics collection with LocusCollector for deduplication..."
             if ! sentieon driver -r "$ref_fasta_local" -t $num_threads $bam_input --temp_dir "$workdir" \
@@ -684,7 +684,7 @@ steps:
 
         output_bam_path=""
 
-        if [ $perform_dedup == true ]; then
+        if [ "$perform_dedup" == true ]; then
 
           # Deduplication Step
           echo "================================================"
@@ -705,7 +705,7 @@ steps:
 
           # For cloud fuse systems, mkdir should be close to usage
           mkdir -p "${output_folder}"
-          if [ $output_metrics == true ]; then
+          if [ "$output_metrics" == true ]; then
             echo "Running deduplication with metrics..."
             if ! sentieon driver -r "$ref_fasta_local" -t $num_threads --temp_dir "$workdir" $bam_input --algo Dedup \
               --score_info score.txt.gz --metrics "$metrics_dir_local/${sample_name}_dedup_metrics.txt" \
@@ -944,12 +944,12 @@ steps:
         fi
 
         # Copy metrics to output folder if they were generated
-        if [ $output_metrics == true ]; then
+        if [ "$output_metrics" == true ]; then
           mkdir -p "$metrics_dir" || { echo "Failed to create output folder metrics directory"; exit 1; }
           cp -r "$metrics_dir_local"/* "$metrics_dir/" || { echo "Failed to copy metrics to output folder"; exit 1; }
         fi
 
-        cp -f ${sample_name}_bwa_run.log "$output_folder"/
+        cp -f "${sample_name}_bwa_run.log" "$output_folder"/
 
         # Final completion summary
         echo "================================================"
@@ -959,7 +959,7 @@ steps:
         echo "📁 Final Output:"
         echo "  - Output Folder: $output_folder"
         echo "  - Main BAM/CRAM: $output_bam_path"
-        if [ $output_metrics == true ]; then
+        if [ "$output_metrics" == true ]; then
           echo "  - Metrics Directory: ${sample_name}_metrics"
         fi
         echo "  - Log File: ${sample_name}_bwa_run.log"
@@ -983,7 +983,7 @@ steps:
           align_extension=".bam"
         fi
         output_folder_rel=$(echo "$output_folder" | sed "s|^${WORKSPACE_DIR}/||")
-        if [[ $perform_dedup == true ]]; then
+        if [[ "$perform_dedup" == true ]]; then
           output_bam_path="${output_folder_rel}/${sample_name}_deduped${align_extension}"
           output_bam_file="${output_folder}/${sample_name}_deduped${align_extension}"
         else

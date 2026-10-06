@@ -69,7 +69,7 @@ steps:
         fi
 
         # Create project directory if it doesn't exist, and check for project directory
-        mkdir -p ${project_directory}
+        mkdir -p "${project_directory}"
         if [[ -d "${project_directory}/${project_name}" && "${overwrite_project}" == "false" ]]; then
           echo "Project directory already exists and overwrite is set to false"
           exit 1

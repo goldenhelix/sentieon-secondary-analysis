@@ -92,7 +92,7 @@ steps:
           echo "No CRAM file detected in input, skipping reference file copy"
         fi
 
-        mkdir -p $cypcall_output_dir
+        mkdir -p "$cypcall_output_dir"
 
         # CypCall Step
         echo "================================================"
